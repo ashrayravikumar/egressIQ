@@ -16,7 +16,7 @@ RAW_SECRETS = [
     "AKIA" + "IOSFODNN7EXAMPLE", "ASIA" + "Q7RTXW2KJ4NPLM3Z", "wJalrXUtnFEMI", "Pr0d-P%40ssw0rd",
     "ghp_" + "R7tQm2Xc9L", "Zx81-qLp", "c4che-s3cret", "Etl!2026", "Sup3r!Secret", "512-44-8721",
     "4539 1488 0343 6467", "alexandra.konstantinopoulou", "maria.gonzalez@gmail.com", "b3BlbnNzaC1rZXkt",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", "415-555-0198",
 ]
 
 

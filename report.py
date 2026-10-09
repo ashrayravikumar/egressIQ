@@ -362,13 +362,15 @@ def _detail_table(findings: List[Finding]) -> Table:
 
 def _remediation_box(findings: List[Finding]) -> KeepTogether:
     n = len(findings)
+    gate = '<font face="Courier">egressiq --fail-on-findings</font>'
     if n:
         status = SeverityBadge("critical", "Action required", width=88, height=14)
-        status_text = (f"<b>{n}</b> finding{'s' if n != 1 else ''} require{'' if n != 1 else 's'} remediation. "
-                       "With EgressIQ Gateway enforced, <b>0</b> would leave your network.")
+        status_text = "<b>Audit Verdict:</b> Non-compliant data egress detected."
+        path_label = "Remediation Path"
     else:
         status = SeverityBadge("clear", "Compliant", width=70, height=14)
-        status_text = "No exposures in this payload. Gateway keeps it that way as traffic and teams change."
+        status_text = "<b>Audit Verdict:</b> No sensitive data egress detected in this payload."
+        path_label = "Prevention Path"
 
     gap = status.width + 12
     status_row = Table([[status, Paragraph(status_text, S_BODY)]], colWidths=[gap, CONTENT_W - 28 - gap], hAlign="LEFT")
@@ -377,16 +379,15 @@ def _remediation_box(findings: List[Finding]) -> KeepTogether:
                                     ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
 
     pitch = Paragraph(
-        "<b>EgressIQ Gateway</b> is a drop-in egress proxy between your applications and LLM providers "
-        "(OpenAI, Anthropic, Azure OpenAI, AWS Bedrock). Every request is inspected with the same detectors used "
-        "in this audit, and sensitive values are redacted in flight before they leave your network "
-        "<b>with zero code changes</b>: no SDK swaps, no prompt rewrites, no application redeploys.",
+        f"<b>{path_label}:</b> Enforce pre-flight payload sanitization via the EgressIQ Interception Gateway "
+        f"(available in private pilot) or integrate our pre-commit audit gate into CI/CD pipelines using {gate}.",
         S_BODY,
     )
 
-    steps = [("1", "Deploy", "Run the gateway in your VPC, Kubernetes cluster or as a sidecar."),
-             ("2", "Route", "Point HTTPS_PROXY or the provider base URL at the gateway."),
-             ("3", "Enforce", "Redact, block or alert per detector, with a tamper-evident audit trail.")]
+    # Only steps a customer can take today; the Gateway is labelled as a pilot, never as GA.
+    steps = [("1", "Gate CI/CD", f"Add {gate} to pre-commit hooks and pipelines; any finding fails the build."),
+             ("2", "Rotate &amp; purge", "Rotate exposed credentials and purge logs or prompts that held raw values."),
+             ("3", "Pilot the Gateway", "Join the private pilot for inline redaction before requests leave your network.")]
     step_cells = []
     for num, title, text in steps:
         dot = Table([[Paragraph(num, S_STEP_NUM)]], colWidths=[16], rowHeights=[16])
@@ -407,9 +408,9 @@ def _remediation_box(findings: List[Finding]) -> KeepTogether:
     if n:
         secret_detectors = {d for d, det in DETECTORS_BY_NAME.items() if det.category != "pii"}
         rows: List[list] = [[Paragraph(h, s) for h, s in (
-            ("FRAMEWORK", S_TH), ("FINDINGS", S_TH_R), ("DETECTORS", S_TH), ("GATEWAY CONTROL", S_TH))]]
+            ("FRAMEWORK", S_TH), ("FINDINGS", S_TH_R), ("DETECTORS", S_TH), ("RECOMMENDED CONTROL", S_TH))]]
         for e in regulatory_exposure(findings):
-            control = ("Redact + alert security" if secret_detectors & set(e["detectors"])
+            control = ("Rotate + redact before egress" if secret_detectors & set(e["detectors"])
                        else "Redact before egress")
             rows.append([
                 Table([[SeverityBadge(e["severity"], e["framework"], width=_badge_w(e["framework"]))]],
@@ -423,10 +424,9 @@ def _remediation_box(findings: List[Finding]) -> KeepTogether:
         w = CONTENT_W - 28
         inner += [Spacer(1, 12), _data_table(rows, (w * 0.37, w * 0.12, w * 0.30, w * 0.21))]
 
-    next_step = ("run a Gateway pilot using this audit as the baseline policy. "
-                 "Every finding above becomes an enforced, logged redaction rule on day one." if n else
-                 "deploy Gateway to keep every future request this clean, with each detector "
-                 "enforced and logged from day one.")
+    next_step = (f"rotate the exposed credentials above, then add {gate} to CI so new exposures fail the "
+                 "build. This audit can serve as the baseline policy for a Gateway pilot." if n else
+                 f"add {gate} to CI so future payloads stay this clean.")
     inner += [Spacer(1, 10), Paragraph(f"<b>Next step:</b> {next_step}", S_BODY)]
 
     box = Table([[inner]], colWidths=[CONTENT_W], hAlign="LEFT")

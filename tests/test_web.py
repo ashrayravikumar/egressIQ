@@ -74,7 +74,7 @@ def test_scan_includes_regulatory_impact():
 def test_regulatory_covers_pci_and_ssn():
     r = client.post("/api/scan", json={"text": "ssn 123-45-6789 card 4111 1111 1111 1111"}).json()
     names = {e["framework"] for e in r["stats"]["regulatory"]}
-    assert names == {"SOC 2 CC6.1 / GLBA", "PCI-DSS 4.0 §3.4"}
+    assert names == {"SOC 2 CC6.1 / GLBA", "PCI-DSS 4.0 Req 4.2 / 3.4"}
 
 
 def test_detectors_endpoint_lists_regulation():
@@ -134,3 +134,21 @@ def test_cli_web_subcommand_dispatches(monkeypatch):
     monkeypatch.setattr(server, "run", lambda argv: seen.setdefault("argv", argv) and 0)
     cli.main(["web", "--port", "9001"])
     assert seen["argv"] == ["--port", "9001"]
+
+
+@pytest.mark.parametrize("env,argv,expected", [
+    (None, [], "127.0.0.1"),
+    ("0.0.0.0", [], "0.0.0.0"),  # Docker image sets EGRESSIQ_HOST
+    ("0.0.0.0", ["--host", "127.0.0.1"], "127.0.0.1"),
+])
+def test_web_bind_host(monkeypatch, env, argv, expected):
+    import uvicorn
+
+    if env is None:
+        monkeypatch.delenv("EGRESSIQ_HOST", raising=False)
+    else:
+        monkeypatch.setenv("EGRESSIQ_HOST", env)
+    seen = {}
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: seen.update(kw))
+    assert server.run(argv) == 0
+    assert seen["host"] == expected

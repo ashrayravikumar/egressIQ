@@ -64,6 +64,13 @@ _DB_SCHEMES = (
     r"|oracle|cockroachdb|clickhouse|amqps?|snowflake"
 )
 
+# NANP: area code and exchange start 2-9; parenthesised area code optional.
+_NANP_AREA = r"(?:\([2-9]\d{2}\)[-. ]?|[2-9]\d{2}[-. ]?)"
+_NANP_PLUS = rf"\+1[-. ]?{_NANP_AREA}[2-9]\d{{2}}[-. ]?\d{{4}}"
+_NANP_SEPARATED = r"(?:1[-. ])?(?:\([2-9]\d{2}\)[-. ]?|[2-9]\d{2}[-. ])[2-9]\d{2}[-. ]\d{4}"
+_NANP_KEYED = rf"(?:\+?1[-. ]?)?{_NANP_AREA}[2-9]\d{{2}}[-. ]?\d{{4}}"
+_PHONE_KEY = r"(?i:phone|mobile|\bcell|fax|\btel)[\w.-]*[\"']?\s*[:=]\s*[\"']?"
+
 DETECTORS: List[Detector] = [
     Detector(
         name="AWS_ACCESS_KEY_ID",
@@ -128,6 +135,21 @@ DETECTORS: List[Detector] = [
         description="Email address",
     ),
     Detector(
+        name="PHONE_NUMBER",
+        category="pii",
+        severity="medium",
+        pattern=re.compile(
+            # Group 1: optional phone-ish key (phone=, "mobile": , tel:). When present,
+            # compact digits are accepted; bare 10-digit runs without a key or "+1"
+            # are too often order IDs/timestamps to flag.
+            rf"(?:({_PHONE_KEY})|(?<![\w+.-]))"
+            rf"((?(1){_NANP_KEYED}|(?:{_NANP_PLUS}|{_NANP_SEPARATED})))"
+            r"(?![\w-]|\.\d)"
+        ),
+        group=2,
+        description="North American phone number (formatted, +1 E.164, or compact after a phone/tel key)",
+    ),
+    Detector(
         name="US_SSN",
         category="pii",
         severity="high",
@@ -150,9 +172,10 @@ DETECTORS_BY_NAME: Dict[str, Detector] = {d.name: d for d in DETECTORS}
 # scan()/redact() never read it. tests/test_compliance.py requires an entry per detector.
 _SECRETS_EXPOSURE = "SOC 2 CC6.6 (Secrets Exposure)"
 COMPLIANCE_IMPACT: Dict[str, str] = {
-    "CREDIT_CARD": "PCI-DSS 4.0 §3.4",
+    "CREDIT_CARD": "PCI-DSS 4.0 Req 4.2 / 3.4",
     "US_SSN": "SOC 2 CC6.1 / GLBA",
     "EMAIL_ADDRESS": "GDPR / CCPA PII",
+    "PHONE_NUMBER": "GDPR / CCPA PII",
     "AWS_ACCESS_KEY_ID": _SECRETS_EXPOSURE,
     "AWS_SECRET_ACCESS_KEY": _SECRETS_EXPOSURE,
     "GITHUB_TOKEN": _SECRETS_EXPOSURE,

@@ -65,3 +65,34 @@ jobs:
           curl -sf -H 'Content-Type: application/json' -d '{"text":"ssn 123-45-6789"}' \
             http://127.0.0.1:8765/api/report -o web.pdf
           head -c 4 web.pdf | grep -q '%PDF'
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: docker build -t egressiq .
+
+      - name: CLI smoke test
+        run: |
+          mkdir -p data
+          printf 'phone=+1-415-555-0198\nkey=%s\n' "AKIA""IOSFODNN7EXAMPLE" > data/log.txt
+          # --user so the container can write the PDF into the runner-owned bind mount.
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/data:/data" egressiq \
+            --file /data/log.txt --dry-run --export-pdf > sanitized.txt
+          grep -q '\[REDACTED:PHONE_NUMBER\]' sanitized.txt
+          grep -q '\[REDACTED:AWS_ACCESS_KEY_ID\]' sanitized.txt
+          head -c 4 data/egressiq_audit_report.pdf | grep -q '%PDF'
+          if docker run --rm -i egressiq --dry-run --fail-on-findings < data/log.txt > /dev/null; then
+            echo "--fail-on-findings should exit non-zero"; exit 1
+          fi
+
+      - name: Web smoke test
+        run: |
+          docker run -d --name egressiq-web -p 8000:8000 egressiq web
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8000/api/health && break; sleep 1; done
+          curl -sf http://127.0.0.1:8000/api/health | grep -q '"status":"ok"'
+          docker rm -f egressiq-web

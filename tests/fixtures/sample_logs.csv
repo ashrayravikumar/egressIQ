@@ -25,3 +25,4 @@ timestamp,service,level,user,client_ip,message
 2026-10-08T09:00:41Z,mq,INFO,svc-mq,10.4.14.2,amqp://guest:guest@rabbit.internal.acme:5672/orders
 2026-10-08T09:00:43Z,api-gateway,INFO,svc-chat,10.4.2.11,POST /v1/embeddings model=text-embedding-3-large status=200
 2026-10-08T09:00:45Z,support-bot,INFO,billing-escalations@acme-corp.com,172.16.0.4,escalated refund > $500 to billing-escalations@acme-corp.com
+2026-10-08T09:01:40Z,crm-copilot,INFO,svc-crm,10.4.9.8,customer callback phone=+1-415-555-0198 added to ticket summary

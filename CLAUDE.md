@@ -19,8 +19,9 @@ Identifies PII, auth keys, and database strings, redacting them in flight before
 - `web/server.py` — FastAPI wrapper: `/api/scan`, `/api/upload`, `/api/report` (calls `scanner`/`report`, never reimplements them)
 - `web/static/` — single-page UI (`index.html`, `styles.css`, `app.js`); `web/samples.py` — fake demo payloads
 - `app.py` — `python app.py` launcher for the web UI
+- `Dockerfile` — `python:3.12-slim` image, entrypoint `egressiq` (CLI by default, `web` subcommand for the UI); sets `EGRESSIQ_HOST=0.0.0.0`, runs as non-root, writes PDFs to `/data`
 - `tests/samples.py` — labelled positive/negative corpus for every detector
-- `tests/fixtures/sample_logs.csv` — 32-finding fixture covering every detector; `tests/test_report.py` extracts PDF text with `pypdf` to assert sections, framework labels and zero raw secrets
+- `tests/fixtures/sample_logs.csv` — 33-finding fixture covering every detector; `tests/test_report.py` extracts PDF text with `pypdf` to assert sections, framework labels and zero raw secrets
 
 ## Commands
 - Virtual environment: `source venv/bin/activate` (setup: `python3.14 -m venv venv && pip install -e '.[test,web]'`)
@@ -29,6 +30,7 @@ Identifies PII, auth keys, and database strings, redacting them in flight before
 - Run tests on all supported versions (needs `uv`): `scripts/test_matrix.sh`
 - CLI: `egressiq --file <path> [--dry-run] [--export-pdf [OUT]] [--fail-on-findings]` (or `python cli.py ...`; stdin if no `--file`)
 - Web UI: `egressiq web [--port 8000] [--open]` or `python app.py` → http://127.0.0.1:8000
+- Docker: `docker build -t egressiq .`, then `docker run --rm -v "$PWD:/data" egressiq --file /data/app.log --export-pdf` or `docker run --rm -p 8000:8000 egressiq web` (on Linux add `--user "$(id -u):$(id -g)"` so the PDF can be written to the mount)
 
 ## Web UI demo
 1. `source venv/bin/activate && egressiq web --open`
@@ -38,7 +40,7 @@ Identifies PII, auth keys, and database strings, redacting them in flight before
 5. Hover a highlight or findings row to trace it across both panes; click a row to jump to it.
 6. "Download Executive Audit PDF" streams the `report.py` PDF (masked values only).
 7. Screen-sharing real client data? Click **Mask raw values** in the top bar (or Shift+M) first: the editor and raw pane show masked previews only. Remembered per browser; `?mask=1` starts masked with no flash of raw values.
-- Binds to 127.0.0.1 by default; use `--host 0.0.0.0` only on a trusted network.
+- Binds to 127.0.0.1 by default (`EGRESSIQ_HOST` overrides; the Docker image sets 0.0.0.0); use `--host 0.0.0.0` only on a trusted network.
 - Web tests (`tests/test_web.py`) skip automatically if the `[web]` extra isn't installed.
 
 ## Rules
@@ -47,4 +49,5 @@ Identifies PII, auth keys, and database strings, redacting them in flight before
 - Do not introduce heavy dependencies unless strictly necessary.
 - Always include automated tests for new regex pattern matchers: add positives and negatives to `tests/samples.py` (the suite fails if a detector has none).
 - Never write raw sensitive values to reports or logs; use `Finding.masked`.
+- Don't present the Interception Gateway (proxy) as generally available in reports or UI copy: it is in private pilot. Only claim what ships (scanner, CLI gate, web UI, PDF).
 - Web layer is a thin wrapper: keep detection/report logic in `scanner.py`/`report.py`, and insert payload text in the UI via `textContent` only (never `innerHTML`).

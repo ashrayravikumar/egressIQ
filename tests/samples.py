@@ -77,6 +77,17 @@ STANDALONE = {
         "billing%dept@mail.example.com",
     ],
     "US_SSN": ["123-45-6789", "078-05-1120", "899-99-9999", "001-01-0001"],
+    "PHONE_NUMBER": [
+        "+14155550198",
+        "+1-415-555-0198",
+        "+1 (415) 555-0198",
+        "+1.212.555.0147",
+        "(415) 555-0198",
+        "415-555-0198",
+        "415.555.0198",
+        "415 555 0198",
+        "1-800-555-0199",
+    ],
     "CREDIT_CARD": [
         "4111111111111111",
         "4111 1111 1111 1111",
@@ -120,6 +131,23 @@ POSITIVES["AWS_SECRET_ACCESS_KEY"] = [
     (f"[default]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = {_AWS_SECRET}\n", _AWS_SECRET),
 ]
 
+# Compact numbers are only flagged after a phone/tel key, so they're listed with context.
+POSITIVES["PHONE_NUMBER"] += [
+    ("phone=+1-415-555-0198", "+1-415-555-0198"),
+    ("phone:415-555-0198", "415-555-0198"),
+    ("phone=4155550198", "4155550198"),
+    ("Phone: 4155550198", "4155550198"),
+    ("PHONE_NUMBER=14155550198", "14155550198"),
+    ('{"phone_number": "4155550198", "n": 1}', "4155550198"),
+    ("homePhone=4155550198", "4155550198"),
+    ("mobile = '+1 415 555 0198'", "+1 415 555 0198"),
+    ("cell=(415)555-0198", "(415)555-0198"),
+    ("fax: 212.555.0147", "212.555.0147"),
+    ("<a href=\"tel:4155550198\">call</a>", "4155550198"),
+    ("tel:+14155550198", "+14155550198"),
+    ("contact phone=+1-415-555-0198, ext 12", "+1-415-555-0198"),
+]
+
 NEGATIVES = {
     "AWS_ACCESS_KEY_ID": [
         "AKIA1234",  # too short
@@ -156,6 +184,17 @@ NEGATIVES = {
     ],
     "EMAIL_ADDRESS": ["user@localhost", "@handle on twitter", "a@b", "name at example dot com"],
     "US_SSN": ["000-12-3456", "666-12-3456", "900-12-3456", "123-00-4567", "123-45-0000", "123456789"],
+    "PHONE_NUMBER": [
+        "order 4155550198",  # bare 10 digits with no phone key: IDs, not phones
+        "id=4155550198",
+        "hotel=4155550198",  # "tel" inside a word is not a key
+        "epoch 1728547200",
+        "ticket 123-456-7890",  # area code can't start with 1
+        "phone 555-123-4567",  # exchange can't start with 1
+        "released 2026-10-08",
+        "build 415-555-0198-22",  # part of a longer dashed id
+        "ip 10.212.55.19",
+    ],
     "CREDIT_CARD": [
         "4111111111111112",  # fails Luhn
         "order 123456789012",  # 12 digits, too short

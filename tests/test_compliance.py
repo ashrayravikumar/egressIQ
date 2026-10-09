@@ -14,7 +14,7 @@ def test_mapping_references_real_detectors():
 
 
 @pytest.mark.parametrize("detector,framework", [
-    ("CREDIT_CARD", "PCI-DSS 4.0 §3.4"),
+    ("CREDIT_CARD", "PCI-DSS 4.0 Req 4.2 / 3.4"),
     ("US_SSN", "SOC 2 CC6.1 / GLBA"),
     ("EMAIL_ADDRESS", "GDPR / CCPA PII"),
     ("AWS_ACCESS_KEY_ID", "SOC 2 CC6.6 (Secrets Exposure)"),
