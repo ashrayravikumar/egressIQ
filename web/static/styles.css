@@ -281,6 +281,35 @@ mark.flash { animation: flash 1s ease-out; }
 
 .is-busy .kpi-value, .is-busy .pane-body { opacity: .6; transition: opacity .15s; }
 
+/* ── Mask raw values (presenter mode) ────────────────── */
+.mask-toggle { cursor: pointer; font: inherit; font-size: 12px; transition: border-color .15s, color .15s, background .15s; }
+.mask-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+.mask-toggle:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.mask-toggle svg { width: 14px; height: 14px; }
+.mask-toggle .icon-eye-off, .mask-toggle[aria-pressed="true"] .icon-eye { display: none; }
+.mask-toggle[aria-pressed="true"] .icon-eye-off { display: block; }
+.mask-toggle[aria-pressed="true"] { color: var(--brand); border-color: rgba(56, 189, 248, .45); background: rgba(56, 189, 248, .08); }
+.mask-toggle[aria-pressed="true"] svg { color: var(--brand); }
+.switch { width: 24px; height: 14px; border-radius: 999px; background: var(--border-strong); position: relative; transition: background .15s; }
+.switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%;
+  background: #cbd5e1; transition: transform .15s;
+}
+.mask-toggle[aria-pressed="true"] .switch { background: var(--brand); }
+.mask-toggle[aria-pressed="true"] .switch::after { transform: translateX(10px); background: #fff; }
+
+.editor-masked { display: none; }
+.is-masked #payload { display: none; }
+.is-masked .editor-masked { display: block; }
+.editor-masked .pane-body { height: 240px; max-height: none; min-height: 0; }
+.masked-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+  padding: 7px 16px; font-size: 12px; color: var(--brand);
+  background: rgba(56, 189, 248, .06); border-bottom: 1px solid rgba(56, 189, 248, .18);
+}
+.btn-xs { padding: 3px 9px; font-size: 12px; }
+mark.masked { letter-spacing: .02em; }
+
 /* ── Responsive ──────────────────────────────────────── */
 @media (max-width: 1100px) {
   .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -297,4 +326,8 @@ mark.flash { animation: flash 1s ease-out; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
+}
+.is-masked .pane-raw .pane-title::after {
+  content: "masked"; font: 600 10px var(--mono); text-transform: uppercase; letter-spacing: .05em;
+  color: var(--brand); background: rgba(56, 189, 248, .1); padding: 1px 6px; border-radius: 4px;
 }

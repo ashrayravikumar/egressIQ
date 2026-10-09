@@ -35,6 +35,7 @@ Identifies PII, auth keys, and database strings, redacting them in flight before
 4. Drag a `.log/.txt/.json/.csv` file (≤ 5 MB) onto the payload panel, or use Upload file.
 5. Hover a highlight or findings row to trace it across both panes; click a row to jump to it.
 6. "Download Executive Audit PDF" streams the `report.py` PDF (masked values only).
+7. Screen-sharing real client data? Click **Mask raw values** in the top bar (or Shift+M) first: the editor and raw pane show masked previews only. Remembered per browser; `?mask=1` starts masked with no flash of raw values.
 - Binds to 127.0.0.1 by default; use `--host 0.0.0.0` only on a trusted network.
 - Web tests (`tests/test_web.py`) skip automatically if the `[web]` extra isn't installed.
 

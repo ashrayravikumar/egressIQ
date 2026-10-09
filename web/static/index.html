@@ -21,6 +21,13 @@
       </div>
     </div>
     <div class="topbar-status">
+      <button class="pill mask-toggle" id="mask-btn" type="button" aria-pressed="false"
+        title="Hide raw secret values on screen (for screen sharing). Shortcut: Shift+M">
+        <svg class="icon-eye" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3C4.4 3 1.7 5.6.6 8c1.1 2.4 3.8 5 7.4 5s6.3-2.6 7.4-5C14.3 5.6 11.6 3 8 3m0 8.5A3.5 3.5 0 1 1 8 4.5a3.5 3.5 0 0 1 0 7M8 6a2 2 0 1 0 0 4 2 2 0 0 0 0-4" fill="currentColor"/></svg>
+        <svg class="icon-eye-off" viewBox="0 0 16 16" aria-hidden="true"><path d="M1.3 1.3 14.7 14.7l-1.06 1.06-2.3-2.3A7.6 7.6 0 0 1 8 13C4.4 13 1.7 10.4.6 8a9.6 9.6 0 0 1 2.9-3.6L.24 2.36zM4.57 5.46A8 8 0 0 0 2.27 8C3.3 9.9 5.4 11.5 8 11.5c.8 0 1.56-.15 2.24-.42l-1.3-1.3a2 2 0 0 1-2.72-2.72zM8 3c3.6 0 6.3 2.6 7.4 5a9.5 9.5 0 0 1-1.95 2.8l-1.06-1.06A8 8 0 0 0 13.73 8C12.7 6.1 10.6 4.5 8 4.5q-.62 0-1.2.1L5.53 3.33A7.7 7.7 0 0 1 8 3" fill="currentColor"/></svg>
+        <span class="mask-label">Mask raw values</span>
+        <span class="switch" aria-hidden="true"></span>
+      </button>
       <span class="pill pill-live" id="engine-pill"><span class="dot"></span><span id="engine-text">Connecting…</span></span>
       <span class="pill" title="Payloads are processed in memory on this machine">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 7V5a4 4 0 1 1 8 0v2h.5A1.5 1.5 0 0 1 14 8.5v5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 13.5v-5A1.5 1.5 0 0 1 3.5 7zm1.5 0h5V5a2.5 2.5 0 0 0-5 0z" fill="currentColor"/></svg>
@@ -50,6 +57,13 @@
       <div class="editor">
         <textarea id="payload" spellcheck="false" autocomplete="off" aria-label="Payload to scan"
           placeholder="Paste a prompt, log, or config here — or drop a .log, .txt, .json or .csv file."></textarea>
+        <div class="editor-masked" id="payload-masked" aria-label="Payload with sensitive values masked">
+          <div class="masked-banner">
+            <span>Raw values masked · editing paused</span>
+            <button class="btn btn-ghost btn-xs" id="unmask-btn" type="button">Unmask to edit</button>
+          </div>
+          <div class="pane-body" id="masked-body"></div>
+        </div>
         <div class="drop-overlay" id="drop-overlay" aria-hidden="true">
           <div class="drop-inner">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0-12-4.5 4.5M12 3l4.5 4.5M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>

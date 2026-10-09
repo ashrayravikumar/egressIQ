@@ -18,9 +18,11 @@
     rawPane: $("raw-pane"), cleanPane: $("clean-pane"), rawBadge: $("raw-badge"), cleanBadge: $("clean-badge"),
     findingsBody: $("findings-body"), findingsCount: $("findings-count"),
     engineText: $("engine-text"), enginePill: $("engine-pill"), toast: $("toast"), host: $("host"),
+    maskBtn: $("mask-btn"), unmaskBtn: $("unmask-btn"), maskedBody: $("masked-body"),
   };
+  const MASK_KEY = "egressiq.maskRaw";
 
-  const state = { source: DEFAULT_SOURCE, result: null, seq: 0, controller: null, samples: [] };
+  const state = { source: DEFAULT_SOURCE, result: null, seq: 0, controller: null, samples: [], masked: false };
 
   // ── Helpers ────────────────────────────────────────────
   function node(tag, cls, text) {
@@ -89,7 +91,8 @@
           code.appendChild(document.createTextNode(piece.t));
         } else {
           const f = findings[piece.f];
-          const m = node("mark", sanitized ? "redacted" : "sev-" + f.severity, piece.t);
+          const cls = sanitized ? "redacted" : "sev-" + f.severity + (state.masked ? " masked" : "");
+          const m = node("mark", cls, piece.t);
           m.dataset.f = piece.f;
           m.title = sanitized
             ? `${f.detector} redacted (${f.severity})`
@@ -139,7 +142,7 @@
     el.riskMeter.style.width = Math.max(s.risk.score, s.total ? 4 : 0) + "%";
     el.riskSummary.textContent = s.risk.summary;
 
-    renderPane(el.rawPane, r.raw_segments, r.findings, false);
+    renderRaw();
     renderPane(el.cleanPane, r.clean_segments, r.findings, true);
     el.rawBadge.textContent = s.total === 1 ? "1 leak" : `${s.total} leaks`;
     el.rawBadge.classList.toggle("is-zero", s.total === 0);
@@ -157,6 +160,40 @@
     }
   }
 
+  // ── Mask raw values (presenter mode) ───────────────────
+  // Swap each finding's raw text for the server-provided masked preview.
+  function maskedSegments(segments, findings) {
+    return segments.map((s) => (s.f === undefined ? s : { t: findings[s.f].masked, f: s.f }));
+  }
+
+  function renderRaw() {
+    const r = state.result;
+    if (!r) return;
+    if (state.masked) {
+      const segs = maskedSegments(r.raw_segments, r.findings);
+      renderPane(el.rawPane, segs, r.findings, false);
+      renderPane(el.maskedBody, segs, r.findings, false);
+    } else {
+      renderPane(el.rawPane, r.raw_segments, r.findings, false);
+      el.maskedBody.replaceChildren();
+    }
+  }
+
+  function setMasked(on, persist) {
+    state.masked = on;
+    document.body.classList.toggle("is-masked", on);
+    el.maskBtn.setAttribute("aria-pressed", String(on));
+    el.maskBtn.querySelector(".mask-label").textContent = on ? "Raw values masked" : "Mask raw values";
+    if (persist) { try { localStorage.setItem(MASK_KEY, on ? "1" : "0"); } catch {} }
+    renderRaw();
+  }
+
+  function initialMask() {
+    const q = new URLSearchParams(location.search).get("mask");
+    if (q !== null) return q === "1" || q === "true";
+    try { return localStorage.getItem(MASK_KEY) === "1"; } catch { return false; }
+  }
+
   // ── Cross-highlighting ─────────────────────────────────
   function setActive(idx, on) {
     document.querySelectorAll(`[data-f="${idx}"]`).forEach((n) => n.classList.toggle("is-active", on));
@@ -169,7 +206,7 @@
       const t = e.target.closest("[data-f]"); if (t) setActive(t.dataset.f, false);
     });
   }
-  [el.rawPane, el.cleanPane, el.findingsBody].forEach(bindHover);
+  [el.rawPane, el.cleanPane, el.findingsBody, el.maskedBody].forEach(bindHover);
 
   function jumpTo(idx) {
     // Position each pane on its own mark; suppress the proportional sync meanwhile.
@@ -342,6 +379,17 @@
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); clearTimeout(debounce); runScan(); }
   });
   el.scanBtn.addEventListener("click", runScan);
+  el.maskBtn.addEventListener("click", () => {
+    setMasked(!state.masked, true);
+    toast(state.masked ? "Raw values masked for screen sharing" : "Raw values visible", "success");
+  });
+  el.unmaskBtn.addEventListener("click", () => { setMasked(false, true); el.payload.focus(); });
+  document.addEventListener("keydown", (e) => {
+    const typing = e.target.closest && e.target.closest("textarea, input");
+    if (!typing && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === "m") {
+      e.preventDefault(); el.maskBtn.click();
+    }
+  });
   el.pdfBtn.addEventListener("click", downloadPdf);
   el.copyBtn.addEventListener("click", copySanitized);
   el.fileInput.addEventListener("change", () => {
@@ -365,6 +413,7 @@
   if (!/Mac|iPhone|iPad/.test(navigator.platform)) el.scanKbd.textContent = "Ctrl↵";
   el.host.textContent = location.host;
 
+  setMasked(initialMask(), false);
   initHealth();
   initSamples();
 })();
