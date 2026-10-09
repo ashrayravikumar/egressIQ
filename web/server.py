@@ -21,8 +21,8 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from report import build_pdf, risk_assessment
-from scanner import COMPLIANCE_IMPACT, DETECTORS, SEVERITY_ORDER, Finding, redact, scan
+from report import build_pdf, regulatory_exposure, risk_assessment
+from scanner import COMPLIANCE_IMPACT, DETECTORS, Finding, redact, scan
 from web.samples import SAMPLES
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -56,22 +56,6 @@ def _segments(text: str, findings: List[Finding], sanitized: bool) -> List[Dict[
     if cursor < len(text):
         out.append({"t": text[cursor:]})
     return out
-
-
-def regulatory_exposure(findings: List[Finding]) -> List[Dict[str, Any]]:
-    """Frameworks implicated by the findings, most severe first, then by volume."""
-    agg: Dict[str, Dict[str, Any]] = {}
-    for f in findings:
-        name = COMPLIANCE_IMPACT.get(f.detector)
-        if not name:
-            continue
-        entry = agg.setdefault(name, {"framework": name, "findings": 0, "severity": f.severity, "detectors": []})
-        entry["findings"] += 1
-        if SEVERITY_ORDER[f.severity] < SEVERITY_ORDER[entry["severity"]]:
-            entry["severity"] = f.severity
-        if f.detector not in entry["detectors"]:
-            entry["detectors"].append(f.detector)
-    return sorted(agg.values(), key=lambda e: (SEVERITY_ORDER[e["severity"]], -e["findings"], e["framework"]))
 
 
 def analyze(text: str, source_name: str) -> Dict[str, Any]:

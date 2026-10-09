@@ -1,6 +1,7 @@
 """EgressIQ executive audit PDF generation (reportlab).
 
 Reports only ever contain masked previews, never raw sensitive values.
+cli.py imports this module lazily, so the scan / --dry-run path never loads reportlab.
 """
 
 from __future__ import annotations
@@ -9,10 +10,46 @@ import hashlib
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Sequence
+from xml.sax.saxutils import escape
 
-from scanner import DETECTORS_BY_NAME, SEVERITY_ORDER, Finding
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.platypus import (
+    Flowable, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+)
+
+from scanner import COMPLIANCE_IMPACT, DETECTORS_BY_NAME, SEVERITY_ORDER, Finding
 
 MAX_DETAIL_ROWS = 500
+
+# Layout (points). Letter width 612 - 2 * 54 margins = 504 usable.
+# SimpleDocTemplate's frame adds 6pt padding per side, so page margins sit 6pt outside MARGIN.
+MARGIN = 54
+FRAME_PAD = 6
+CONTENT_W = letter[0] - 2 * MARGIN
+DETAIL_COL_WIDTHS = (40, 140, 80, 240)  # Line, Detector, Severity, Masked Preview
+BADGE_W, BADGE_H = 58, 13
+
+# Palette
+INK = colors.HexColor("#0F172A")
+BODY = colors.HexColor("#334155")
+MUTED = colors.HexColor("#64748B")
+BORDER = colors.HexColor("#E2E8F0")
+ZEBRA = colors.HexColor("#F8FAFC")
+NAVY = colors.HexColor("#0B1220")
+BRAND = colors.HexColor("#0EA5E9")
+OK = colors.HexColor("#059669")
+SEVERITY_COLORS = {
+    "critical": colors.HexColor("#991B1B"),
+    "high": colors.HexColor("#DC2626"),
+    "medium": colors.HexColor("#D97706"),
+    "low": colors.HexColor("#475569"),
+    "clear": OK,
+    "none": colors.HexColor("#CBD5E1"),  # zero-count chip
+}
 
 # ── Risk scoring (shared with the web UI) ────────────────────────────────
 # The worst severity sets the band; volume of findings moves the score up within it.
@@ -38,100 +75,414 @@ def risk_assessment(findings: Sequence[Finding]) -> Dict[str, Any]:
             "summary": RISK_SUMMARIES[worst]}
 
 
-def build_pdf(findings: List[Finding], source_name: str, source_text: str, out_path: str) -> str:
-    # Imported lazily so the scanner and --dry-run path never pay for reportlab.
-    from reportlab.lib import colors
-    from reportlab.lib.pagesizes import letter
-    from reportlab.lib.styles import getSampleStyleSheet
-    from reportlab.lib.units import inch
-    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+def regulatory_exposure(findings: Sequence[Finding]) -> List[Dict[str, Any]]:
+    """Frameworks implicated by the findings, most severe first, then by volume."""
+    agg: Dict[str, Dict[str, Any]] = {}
+    for f in findings:
+        name = COMPLIANCE_IMPACT.get(f.detector)
+        if not name:
+            continue
+        entry = agg.setdefault(name, {"framework": name, "findings": 0, "severity": f.severity, "detectors": []})
+        entry["findings"] += 1
+        if SEVERITY_ORDER[f.severity] < SEVERITY_ORDER[entry["severity"]]:
+            entry["severity"] = f.severity
+        if f.detector not in entry["detectors"]:
+            entry["detectors"].append(f.detector)
+    return sorted(agg.values(), key=lambda e: (SEVERITY_ORDER[e["severity"]], -e["findings"], e["framework"]))
 
-    styles = getSampleStyleSheet()
-    sev_colors = {
-        "critical": colors.HexColor("#b42318"),
-        "high": colors.HexColor("#c4320a"),
-        "medium": colors.HexColor("#b54708"),
-        "low": colors.HexColor("#475467"),
-    }
-    table_style = TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#101828")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d0d5dd")),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f9fafb")]),
+
+# ── Text styles ──────────────────────────────────────────────────────────
+def _style(name: str, **kw: Any) -> ParagraphStyle:
+    # Defaults apply only to root styles; a style with a parent inherits everything it doesn't override.
+    base = {} if "parent" in kw else {"fontName": "Helvetica", "fontSize": 9, "leading": 12, "textColor": BODY}
+    base.update(kw)
+    return ParagraphStyle(name, **base)
+
+
+S_H2 = _style("h2", fontName="Helvetica-Bold", fontSize=12, leading=15, textColor=INK, spaceAfter=2)
+S_CAPTION = _style("caption", fontSize=8, leading=11, textColor=MUTED, spaceAfter=8)
+S_BODY = _style("body")
+S_SMALL = _style("small", fontSize=7.5, leading=10, textColor=MUTED)
+S_TH = _style("th", fontName="Helvetica-Bold", fontSize=7, leading=9, textColor=MUTED)
+S_TH_R = _style("th_r", parent=S_TH, alignment=TA_RIGHT)
+S_TD = _style("td", fontSize=8, leading=10.5, textColor=INK, wordWrap="CJK")
+S_TD_R = _style("td_r", parent=S_TD, alignment=TA_RIGHT)
+S_TD_REG = _style("td_reg", parent=S_TD, fontName="Helvetica-Bold", fontSize=7.5, textColor=colors.HexColor("#6D28D9"))
+S_TD_SMALL = _style("td_small", parent=S_TD, fontSize=7, leading=9, textColor=BODY, wordWrap=None)
+S_TD_MONO = _style("td_mono", parent=S_TD, fontName="Courier", fontSize=8, textColor=BODY)
+S_STAT_NUM = _style("stat_num", fontName="Helvetica-Bold", fontSize=16, leading=19, textColor=INK)
+S_STAT_LBL = _style("stat_lbl", fontSize=6.5, leading=8.5, textColor=MUTED)
+S_BOX_TITLE = _style("box_title", fontName="Helvetica-Bold", fontSize=12, leading=15, textColor=INK)
+S_STEP_NUM = _style("step_num", fontName="Helvetica-Bold", fontSize=9, textColor=colors.white, alignment=TA_CENTER)
+S_STEP = _style("step", fontSize=8, leading=10.5)
+
+
+def _fit(text: str, font: str, size: float, max_w: float) -> str:
+    """Middle-truncate text so it fits max_w (keeps file extensions readable)."""
+    if stringWidth(text, font, size) <= max_w:
+        return text
+    keep = len(text)
+    while keep > 4:
+        keep -= 1
+        head, tail = text[: keep // 2], text[len(text) - (keep - keep // 2):]
+        candidate = f"{head}…{tail}"
+        if stringWidth(candidate, font, size) <= max_w:
+            return candidate
+    return "…"
+
+
+def _badge_w(label: str) -> float:
+    return stringWidth(label.upper(), "Helvetica-Bold", 6.8) + 14
+
+
+# ── Custom flowables ─────────────────────────────────────────────────────
+class SeverityBadge(Flowable):
+    """Rounded severity chip with white label."""
+
+    def __init__(self, level: str, label: str = "", width: float = BADGE_W, height: float = BADGE_H):
+        super().__init__()
+        self.level, self.label = level.lower(), (label or level).upper()
+        self.width, self.height = width, height
+
+    def wrap(self, aw: float, ah: float):
+        return self.width, self.height
+
+    def draw(self) -> None:
+        c = self.canv
+        c.setFillColor(SEVERITY_COLORS[self.level])
+        c.roundRect(0, 0, self.width, self.height, 3, stroke=0, fill=1)
+        c.setFillColor(MUTED if self.level == "none" else colors.white)
+        c.setFont("Helvetica-Bold", 6.8)
+        c.drawCentredString(self.width / 2, self.height / 2 - 2.4, self.label)
+
+
+class HeaderBanner(Flowable):
+    def __init__(self, width: float, meta: List[tuple]):
+        super().__init__()
+        self.width, self.height, self.meta = width, 104, meta
+
+    def wrap(self, aw: float, ah: float):
+        return self.width, self.height
+
+    def draw(self) -> None:
+        c, w, h = self.canv, self.width, self.height
+        c.setFillColor(NAVY)
+        c.roundRect(0, 0, w, h, 8, stroke=0, fill=1)
+        c.setFillColor(BRAND)
+        c.rect(0, h - 3, w, 3, stroke=0, fill=1)  # brand hairline
+
+        # Badge: shield + wordmark
+        bx, by, bw, bh = 18, h - 38, 84, 20
+        c.setFillColor(BRAND)
+        c.roundRect(bx, by, bw, bh, 4, stroke=0, fill=1)
+        p = c.beginPath()
+        sx, sy = bx + 7, by + 4
+        p.moveTo(sx + 5, sy + 13)
+        p.lineTo(sx, sy + 11)
+        p.lineTo(sx, sy + 6)
+        p.curveTo(sx, sy + 2.5, sx + 2.5, sy + 0.5, sx + 5, sy)
+        p.curveTo(sx + 7.5, sy + 0.5, sx + 10, sy + 2.5, sx + 10, sy + 6)
+        p.lineTo(sx + 10, sy + 11)
+        p.close()
+        c.setFillColor(NAVY)
+        c.drawPath(p, stroke=0, fill=1)
+        c.setFillColor(colors.white)
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(bx + 22, by + 6.2, "EgressIQ")
+
+        c.setFillColor(colors.white)
+        c.setFont("Helvetica-Bold", 17)
+        c.drawString(18, h - 64, "GenAI Egress Audit Report")
+        c.setFillColor(colors.HexColor("#94A3B8"))
+        c.setFont("Helvetica", 8.5)
+        c.drawString(18, h - 79, "Data loss prevention scan of outbound LLM traffic")
+
+        # Metadata column
+        mx = w * 0.56
+        max_val_w = w - mx - 18
+        y = h - 24
+        for label, value in self.meta:
+            c.setFillColor(colors.HexColor("#7DD3FC"))
+            c.setFont("Helvetica-Bold", 6.3)
+            c.drawString(mx, y, label.upper())
+            c.setFillColor(colors.white)
+            c.setFont("Helvetica", 8.5)
+            c.drawString(mx, y - 10, _fit(value, "Helvetica", 8.5, max_val_w))
+            y -= 21
+        c.setStrokeColor(colors.HexColor("#1E293B"))
+        c.setLineWidth(0.6)
+        c.line(mx - 14, 14, mx - 14, h - 16)
+
+
+class RiskScore(Flowable):
+    """Large score, level badge and banded gauge."""
+
+    def __init__(self, risk: Dict[str, Any], width: float):
+        super().__init__()
+        self.risk, self.width, self.height = risk, width, 92
+
+    def wrap(self, aw: float, ah: float):
+        return self.width, self.height
+
+    def draw(self) -> None:
+        c, w = self.canv, self.width
+        level = self.risk["level"].lower()
+        color = SEVERITY_COLORS[level]
+        score = str(self.risk["score"])
+
+        c.setFillColor(MUTED)
+        c.setFont("Helvetica-Bold", 6.5)
+        c.drawString(0, 82, "OVERALL RISK SCORE")
+        c.setFillColor(color)
+        c.setFont("Helvetica-Bold", 38)
+        c.drawString(0, 42, score)
+        sw = stringWidth(score, "Helvetica-Bold", 38)
+        c.setFillColor(MUTED)
+        c.setFont("Helvetica", 11)
+        c.drawString(sw + 3, 43, "/ 100")
+
+        SeverityBadge(level, self.risk["level"], width=64, height=14).drawOn(c, 0, 20)
+
+        # Gauge: four tinted bands with the filled score on top.
+        gy, gh = 4, 6
+        c.setFillColor(colors.HexColor("#E2E8F0"))
+        c.roundRect(0, gy, w, gh, 3, stroke=0, fill=1)
+        fill_w = max(gh, w * self.risk["score"] / 100) if self.risk["score"] else 0
+        if fill_w:
+            c.setFillColor(color)
+            c.roundRect(0, gy, fill_w, gh, 3, stroke=0, fill=1)
+        c.setStrokeColor(colors.white)
+        c.setLineWidth(1)
+        for t in (25, 50, 75):
+            c.line(w * t / 100, gy, w * t / 100, gy + gh)
+
+
+# ── Builders ─────────────────────────────────────────────────────────────
+def _section(title: str, caption: str) -> List[Flowable]:
+    return [Paragraph(title, S_H2), Paragraph(caption, S_CAPTION)]
+
+
+def _data_table(rows: List[list], widths: Sequence[float], numeric_cols: Sequence[int] = ()) -> Table:
+    t = Table(rows, colWidths=list(widths), repeatRows=1, hAlign="LEFT")
+    style = [
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-    ])
-
-    by_sev = Counter(f.severity for f in findings)
-    by_det = Counter(f.detector for f in findings)
-    worst = min(by_sev, key=SEVERITY_ORDER.__getitem__) if findings else None
-    digest = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
-    generated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    story = [
-        Paragraph("EgressIQ Audit Report", styles["Title"]),
-        Paragraph(f"Generated {generated}", styles["Normal"]),
-        Spacer(1, 0.2 * inch),
-        Paragraph("Executive Summary", styles["Heading2"]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("BACKGROUND", (0, 0), (-1, 0), ZEBRA),
+        ("LINEABOVE", (0, 0), (-1, 0), 0.6, BORDER),
+        ("LINEBELOW", (0, 0), (-1, 0), 0.6, BORDER),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.35, BORDER),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FBFCFE")]),
     ]
+    t.setStyle(TableStyle(style))
+    return t
+
+
+def _risk_box(findings: List[Finding], risk: Dict[str, Any]) -> Table:
+    by_sev = Counter(f.severity for f in findings)
+    by_cat = Counter(f.category for f in findings)
+    detectors = len({f.detector for f in findings})
+
     if findings:
+        worst = risk["level"].lower()
         verdict = (
-            f"<b>{len(findings)}</b> sensitive item(s) detected across "
-            f"<b>{len(by_det)}</b> detector type(s). Highest severity: "
-            f"<font color='#{sev_colors[worst].hexval()[2:]}'><b>{worst.upper()}</b></font>. "
-            "All items would be redacted before egress to upstream LLM APIs."
+            f"<b>{len(findings)}</b> sensitive item{'s' if len(findings) != 1 else ''} across "
+            f"<b>{detectors}</b> detector type{'s' if detectors != 1 else ''} would have been sent to "
+            f"third-party LLM providers. Highest severity: "
+            f"<font color='{SEVERITY_COLORS[worst].hexval().replace('0x', '#')}'><b>{risk['level']}</b></font>. "
+            f"{escape(risk['summary'])}"
         )
     else:
-        verdict = "No sensitive data detected. Payload is clear for egress."
-    story += [Paragraph(verdict, styles["Normal"]), Spacer(1, 0.15 * inch)]
+        verdict = "No sensitive data detected. This payload is clear for egress to upstream LLM APIs."
 
-    meta = Table(
-        [["Source", source_name], ["SHA-256", digest], ["Size", f"{len(source_text):,} characters"]],
-        colWidths=[1.1 * inch, 5.4 * inch], hAlign="LEFT",
+    def stat(num: Any, label: str) -> list:
+        return [Paragraph(str(num), S_STAT_NUM), Paragraph(label.upper(), S_STAT_LBL)]
+
+    stats = Table(
+        [[stat(len(findings), "Total findings"),
+          stat(by_cat["credential"] + by_cat["infrastructure"], "Secrets blocked"),
+          stat(by_cat["pii"], "PII redacted"),
+          stat(len(regulatory_exposure(findings)), "Frameworks hit")]],
+        colWidths=[(CONTENT_W - 150 - 28) / 4] * 4, hAlign="LEFT",
     )
-    meta.setStyle(TableStyle([
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#d0d5dd")),
+    stats.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+        ("LINEBEFORE", (1, 0), (-1, 0), 0.5, BORDER), ("LEFTPADDING", (1, 0), (-1, 0), 8),
     ]))
-    story += [meta, Spacer(1, 0.25 * inch)]
+
+    chips = [[SeverityBadge(s if by_sev[s] else "none", f"{s} {by_sev[s]}", width=66)
+              for s in ("critical", "high", "medium", "low")]]
+    chip_row = Table(chips, colWidths=[72] * 4, hAlign="LEFT")
+    chip_row.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                  ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+
+    left_w = 150
+    right = [Paragraph("Executive Risk Summary", S_BOX_TITLE), Spacer(1, 4),
+             Paragraph(verdict, S_BODY), Spacer(1, 9), stats, Spacer(1, 9), chip_row]
+    box = Table([[RiskScore(risk, left_w - 28), right]], colWidths=[left_w, CONTENT_W - left_w], hAlign="LEFT")
+    box.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.8, BORDER),
+        ("BACKGROUND", (0, 0), (0, 0), ZEBRA),
+        ("LINEAFTER", (0, 0), (0, 0), 0.8, BORDER),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("VALIGN", (0, 0), (0, 0), "MIDDLE"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 14), ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+        ("TOPPADDING", (0, 0), (-1, -1), 14), ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+    ]))
+    return box
+
+
+def _detector_table(findings: List[Finding]) -> Table:
+    by_det = Counter(f.detector for f in findings)
+    total = len(findings)
+    rows: List[list] = [[Paragraph(h, s) for h, s in (
+        ("DETECTOR", S_TH), ("STATUTORY IMPACT", S_TH), ("SEVERITY", S_TH), ("FINDINGS", S_TH_R), ("SHARE", S_TH_R))]]
+    for name, count in sorted(
+        by_det.items(), key=lambda kv: (SEVERITY_ORDER[DETECTORS_BY_NAME[kv[0]].severity], -kv[1], kv[0])
+    ):
+        d = DETECTORS_BY_NAME[name]
+        rows.append([Paragraph(name, S_TD), Paragraph(escape(COMPLIANCE_IMPACT.get(name, "")), S_TD_REG),
+                     SeverityBadge(d.severity), Paragraph(str(count), S_TD_R),
+                     Paragraph(f"{100 * count / total:.0f}%", S_TD_R)])
+    return _data_table(rows, (140, 160, 80, 60, 64))
+
+
+def _detail_table(findings: List[Finding]) -> Table:
+    rows: List[list] = [[Paragraph("LINE", S_TH_R), Paragraph("DETECTOR", S_TH),
+                         Paragraph("SEVERITY", S_TH), Paragraph("MASKED PREVIEW", S_TH)]]
+    for f in findings[:MAX_DETAIL_ROWS]:
+        rows.append([Paragraph(str(f.line), S_TD_R), Paragraph(f.detector, S_TD), SeverityBadge(f.severity),
+                     Paragraph(escape(f.masked), S_TD_MONO)])
+    return _data_table(rows, DETAIL_COL_WIDTHS)
+
+
+def _remediation_box(findings: List[Finding]) -> KeepTogether:
+    n = len(findings)
+    if n:
+        status = SeverityBadge("critical", "Action required", width=88, height=14)
+        status_text = (f"<b>{n}</b> finding{'s' if n != 1 else ''} require{'' if n != 1 else 's'} remediation. "
+                       "With EgressIQ Gateway enforced, <b>0</b> would leave your network.")
+    else:
+        status = SeverityBadge("clear", "Compliant", width=70, height=14)
+        status_text = "No exposures in this payload. Gateway keeps it that way as traffic and teams change."
+
+    gap = status.width + 12
+    status_row = Table([[status, Paragraph(status_text, S_BODY)]], colWidths=[gap, CONTENT_W - 28 - gap], hAlign="LEFT")
+    status_row.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                                    ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                    ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+
+    pitch = Paragraph(
+        "<b>EgressIQ Gateway</b> is a drop-in egress proxy between your applications and LLM providers "
+        "(OpenAI, Anthropic, Azure OpenAI, AWS Bedrock). Every request is inspected with the same detectors used "
+        "in this audit, and sensitive values are redacted in flight before they leave your network "
+        "<b>with zero code changes</b>: no SDK swaps, no prompt rewrites, no application redeploys.",
+        S_BODY,
+    )
+
+    steps = [("1", "Deploy", "Run the gateway in your VPC, Kubernetes cluster or as a sidecar."),
+             ("2", "Route", "Point HTTPS_PROXY or the provider base URL at the gateway."),
+             ("3", "Enforce", "Redact, block or alert per detector, with a tamper-evident audit trail.")]
+    step_cells = []
+    for num, title, text in steps:
+        dot = Table([[Paragraph(num, S_STEP_NUM)]], colWidths=[16], rowHeights=[16])
+        dot.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), BRAND), ("ROUNDEDCORNERS", [8, 8, 8, 8]),
+                                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                                 ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                 ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 2)]))
+        step_cells.append([dot, Spacer(1, 4), Paragraph(f"<b>{title}</b>", S_STEP), Paragraph(text, S_STEP)])
+    col = (CONTENT_W - 28) / 3
+    steps_t = Table([step_cells], colWidths=[col] * 3, hAlign="LEFT")
+    steps_t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                 ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+                                 ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+
+    inner: List[Flowable] = [Paragraph("Remediation &amp; Compliance Status", S_BOX_TITLE), Spacer(1, 8),
+                             status_row, Spacer(1, 10), pitch, Spacer(1, 10), steps_t]
+
+    if n:
+        secret_detectors = {d for d, det in DETECTORS_BY_NAME.items() if det.category != "pii"}
+        rows: List[list] = [[Paragraph(h, s) for h, s in (
+            ("FRAMEWORK", S_TH), ("FINDINGS", S_TH_R), ("DETECTORS", S_TH), ("GATEWAY CONTROL", S_TH))]]
+        for e in regulatory_exposure(findings):
+            control = ("Redact + alert security" if secret_detectors & set(e["detectors"])
+                       else "Redact before egress")
+            rows.append([
+                Table([[SeverityBadge(e["severity"], e["framework"], width=_badge_w(e["framework"]))]],
+                      style=[("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                             ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)],
+                      hAlign="LEFT"),
+                Paragraph(str(e["findings"]), S_TD_R),
+                Paragraph(", ".join(e["detectors"]), S_TD_SMALL),
+                Paragraph(control, S_TD),
+            ])
+        w = CONTENT_W - 28
+        inner += [Spacer(1, 12), _data_table(rows, (w * 0.37, w * 0.12, w * 0.30, w * 0.21))]
+
+    next_step = ("run a Gateway pilot using this audit as the baseline policy. "
+                 "Every finding above becomes an enforced, logged redaction rule on day one." if n else
+                 "deploy Gateway to keep every future request this clean, with each detector "
+                 "enforced and logged from day one.")
+    inner += [Spacer(1, 10), Paragraph(f"<b>Next step:</b> {next_step}", S_BODY)]
+
+    box = Table([[inner]], colWidths=[CONTENT_W], hAlign="LEFT")
+    box.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#F0F9FF")),
+        ("BOX", (0, 0), (-1, -1), 0.8, colors.HexColor("#BAE6FD")),
+        ("LINEBEFORE", (0, 0), (0, -1), 3, BRAND),
+        ("LEFTPADDING", (0, 0), (-1, -1), 14), ("RIGHTPADDING", (0, 0), (-1, -1), 14),
+        ("TOPPADDING", (0, 0), (-1, -1), 14), ("BOTTOMPADDING", (0, 0), (-1, -1), 14),
+    ]))
+    return KeepTogether([box])
+
+
+def _footer(canvas: Any, doc: Any) -> None:
+    canvas.saveState()
+    canvas.setStrokeColor(BORDER)
+    canvas.setLineWidth(0.5)
+    canvas.line(MARGIN, 40, letter[0] - MARGIN, 40)
+    canvas.setFont("Helvetica", 7)
+    canvas.setFillColor(MUTED)
+    canvas.drawString(MARGIN, 28, "EgressIQ Audit Report  ·  Confidential  ·  Values masked; raw secrets are never stored in this report")
+    canvas.drawRightString(letter[0] - MARGIN, 28, f"Page {doc.page}")
+    canvas.restoreState()
+
+
+def build_pdf(findings: List[Finding], source_name: str, source_text: str, out_path: str) -> str:
+    risk = risk_assessment(findings)
+    digest = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+    lines = source_text.count("\n") + (1 if source_text and not source_text.endswith("\n") else 0)
+    meta = [
+        ("Scan date", datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC")),
+        ("Target file", source_name),
+        ("SHA-256", f"{digest[:24]}…"),
+        ("Payload", f"{len(source_text):,} characters · {lines:,} line{'s' if lines != 1 else ''}"),
+    ]
+
+    story: List[Flowable] = [HeaderBanner(CONTENT_W, meta), Spacer(1, 16), _risk_box(findings, risk)]
 
     if findings:
-        story.append(Paragraph("Findings by Severity", styles["Heading2"]))
-        rows = [["Severity", "Count"]] + [
-            [s.upper(), str(by_sev[s])] for s in sorted(by_sev, key=SEVERITY_ORDER.__getitem__)
-        ]
-        t = Table(rows, colWidths=[2 * inch, 1 * inch], hAlign="LEFT")
-        t.setStyle(table_style)
-        story += [t, Spacer(1, 0.25 * inch)]
-
-        story.append(Paragraph("Findings by Detector", styles["Heading2"]))
-        rows = [["Detector", "Category", "Severity", "Count"]]
-        for name, count in sorted(
-            by_det.items(), key=lambda kv: (SEVERITY_ORDER[DETECTORS_BY_NAME[kv[0]].severity], -kv[1])
-        ):
-            d = DETECTORS_BY_NAME[name]
-            rows.append([name, d.category, d.severity.upper(), str(count)])
-        t = Table(rows, colWidths=[2.4 * inch, 1.4 * inch, 1.2 * inch, 0.8 * inch], hAlign="LEFT")
-        t.setStyle(table_style)
-        story += [t, Spacer(1, 0.25 * inch)]
-
-        story.append(Paragraph("Finding Detail (masked)", styles["Heading2"]))
-        rows = [["Line", "Detector", "Severity", "Masked Preview"]]
-        for f in findings[:MAX_DETAIL_ROWS]:
-            rows.append([str(f.line), f.detector, f.severity.upper(), f.masked])
-        t = Table(rows, colWidths=[0.6 * inch, 2.4 * inch, 1.0 * inch, 2.5 * inch], repeatRows=1, hAlign="LEFT")
-        t.setStyle(table_style)
-        story.append(t)
+        story += [Spacer(1, 20), *_section("Findings by Detector", "Grouped by detection rule, most severe first.")]
+        story += [_detector_table(findings), Spacer(1, 20)]
+        story += _section("Finding Detail (masked)",
+                          "Each finding with its source line. Previews show only the first characters of each value.")
+        story.append(_detail_table(findings))
         if len(findings) > MAX_DETAIL_ROWS:
-            story.append(Paragraph(
-                f"Detail truncated: showing {MAX_DETAIL_ROWS} of {len(findings)} findings.",
-                styles["Italic"],
-            ))
+            story += [Spacer(1, 6), Paragraph(
+                f"Detail truncated: showing {MAX_DETAIL_ROWS:,} of {len(findings):,} findings.", S_SMALL)]
+
+    story += [Spacer(1, 20), _remediation_box(findings), Spacer(1, 8), Paragraph(
+        "Risk score bands: 75–99 Critical · 50–74 High · 25–49 Medium · 1–24 Low "
+        "· 0 Clear. The most severe finding sets the band; finding volume raises the score within it.",
+        S_SMALL)]
 
     SimpleDocTemplate(
         out_path, pagesize=letter, title="EgressIQ Audit Report", author="EgressIQ",
-        leftMargin=0.75 * inch, rightMargin=0.75 * inch,
-    ).build(story)
+        subject=f"GenAI egress audit: {source_name}",
+        leftMargin=MARGIN - FRAME_PAD, rightMargin=MARGIN - FRAME_PAD, topMargin=44, bottomMargin=56,
+    ).build(story, onFirstPage=_footer, onLaterPages=_footer)
     return out_path

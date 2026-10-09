@@ -20,7 +20,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7.0", "httpx>=0.24"]
+test = ["pytest>=7.0", "httpx>=0.24", "pypdf>=3.0"]
 web = ["fastapi>=0.100", "uvicorn>=0.23", "python-multipart>=0.0.6"]
 
 [project.scripts]

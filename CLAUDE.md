@@ -13,12 +13,14 @@ Identifies PII, auth keys, and database strings, redacting them in flight before
 
 ## Layout
 - `scanner.py` — detector registry (`DETECTORS`), `scan()`, `redact()`
-- `report.py` — reportlab audit PDF (masked values only; reportlab imported lazily)
+- `report.py` — reportlab audit PDF (masked values only; cli imports it lazily). Also owns `risk_assessment()` and `regulatory_exposure()`, shared with the web UI so PDF and UI always agree
+- `scanner.COMPLIANCE_IMPACT` — detector → compliance framework label (reporting metadata; `scan()` never reads it)
 - `cli.py` — argparse CLI
 - `web/server.py` — FastAPI wrapper: `/api/scan`, `/api/upload`, `/api/report` (calls `scanner`/`report`, never reimplements them)
 - `web/static/` — single-page UI (`index.html`, `styles.css`, `app.js`); `web/samples.py` — fake demo payloads
 - `app.py` — `python app.py` launcher for the web UI
 - `tests/samples.py` — labelled positive/negative corpus for every detector
+- `tests/fixtures/sample_logs.csv` — 32-finding fixture covering every detector; `tests/test_report.py` extracts PDF text with `pypdf` to assert sections, framework labels and zero raw secrets
 
 ## Commands
 - Virtual environment: `source venv/bin/activate` (setup: `python3.14 -m venv venv && pip install -e '.[test,web]'`)
