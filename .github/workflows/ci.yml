@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: py${{ matrix.python-version }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          # Oldest and newest supported versions on macOS as well.
+          - os: macos-latest
+            python-version: "3.9"
+          - os: macos-latest
+            python-version: "3.14"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[test]'
+
+      - name: Test
+        run: python -m pytest -q -W error::DeprecationWarning
+
+      - name: CLI smoke test
+        run: |
+          printf 'contact jane.doe@example.com\nssn 123-45-6789\n' > smoke.txt
+          egressiq --file smoke.txt --dry-run --export-pdf smoke.pdf > sanitized.txt
+          grep -q '\[REDACTED:EMAIL_ADDRESS\]' sanitized.txt
+          grep -q '\[REDACTED:US_SSN\]' sanitized.txt
+          if grep -q 'jane.doe@example.com' sanitized.txt; then echo "raw PII leaked"; exit 1; fi
+          head -c 4 smoke.pdf | grep -q '%PDF'
