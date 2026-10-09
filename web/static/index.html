@@ -110,6 +110,15 @@
         <div class="meter" aria-hidden="true"><span id="risk-meter"></span></div>
         <div class="kpi-sub" id="risk-summary">No sensitive data detected. Safe for egress.</div>
       </article>
+      <article class="kpi kpi-reg" id="kpi-reg" data-state="clear">
+        <div class="kpi-label">Regulatory exposure</div>
+        <div class="reg-head">
+          <div class="kpi-value" id="reg-count">0</div>
+          <div class="reg-unit" id="reg-unit">frameworks implicated</div>
+        </div>
+        <ul class="reg-list" id="reg-list" aria-label="Frameworks implicated by findings"></ul>
+        <div class="kpi-sub reg-clear" id="reg-clear">No compliance frameworks implicated.</div>
+      </article>
     </section>
 
     <!-- Action bar -->
@@ -163,7 +172,7 @@
       </div>
       <div class="table-wrap">
         <table class="findings">
-          <thead><tr><th>Severity</th><th>Detector</th><th>Category</th><th class="num">Line</th><th>Masked preview</th></tr></thead>
+          <thead><tr><th>Severity</th><th>Detector</th><th>Statutory impact</th><th>Category</th><th class="num">Line</th><th>Masked preview</th></tr></thead>
           <tbody id="findings-body"></tbody>
         </table>
         <div class="empty" id="findings-empty">

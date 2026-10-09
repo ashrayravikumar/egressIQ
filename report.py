@@ -8,11 +8,34 @@ from __future__ import annotations
 import hashlib
 from collections import Counter
 from datetime import datetime, timezone
-from typing import List
+from typing import Any, Dict, List, Sequence
 
 from scanner import DETECTORS_BY_NAME, SEVERITY_ORDER, Finding
 
 MAX_DETAIL_ROWS = 500
+
+# ── Risk scoring (shared with the web UI) ────────────────────────────────
+# The worst severity sets the band; volume of findings moves the score up within it.
+RISK_BANDS = {"critical": (75, 99), "high": (50, 74), "medium": (25, 49), "low": (1, 24)}
+SEVERITY_WEIGHTS = {"critical": 0.35, "high": 0.20, "medium": 0.08, "low": 0.02}
+RISK_SUMMARIES = {
+    "critical": "Live credentials or infrastructure secrets would have left the network.",
+    "high": "Regulated PII or bearer tokens would have reached a third-party model.",
+    "medium": "Personal identifiers present; redaction required for compliance.",
+    "low": "Low-sensitivity identifiers present.",
+}
+
+
+def risk_assessment(findings: Sequence[Finding]) -> Dict[str, Any]:
+    if not findings:
+        return {"level": "CLEAR", "score": 0, "summary": "No sensitive data detected. Safe for egress."}
+    worst = min((f.severity for f in findings), key=SEVERITY_ORDER.__getitem__)
+    residual = 1.0
+    for f in findings:
+        residual *= 1 - SEVERITY_WEIGHTS[f.severity]
+    lo, hi = RISK_BANDS[worst]
+    return {"level": worst.upper(), "score": lo + round((hi - lo) * (1 - residual)),
+            "summary": RISK_SUMMARIES[worst]}
 
 
 def build_pdf(findings: List[Finding], source_name: str, source_text: str, out_path: str) -> str:

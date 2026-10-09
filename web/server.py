@@ -21,8 +21,8 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from report import build_pdf
-from scanner import DETECTORS, SEVERITY_ORDER, Finding, redact, scan
+from report import build_pdf, risk_assessment
+from scanner import COMPLIANCE_IMPACT, DETECTORS, SEVERITY_ORDER, Finding, redact, scan
 from web.samples import SAMPLES
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -44,21 +44,6 @@ def _check_size(text: str) -> None:
         raise HTTPException(413, f"Payload exceeds {MAX_BYTES // (1024 * 1024)} MB limit")
 
 
-def _risk(findings: List[Finding]) -> Dict[str, Any]:
-    if not findings:
-        return {"level": "CLEAR", "score": 0, "summary": "No sensitive data detected. Safe for egress."}
-    weights = {"critical": 40, "high": 20, "medium": 8, "low": 2}
-    score = min(100, sum(weights[f.severity] for f in findings))
-    worst = min((f.severity for f in findings), key=SEVERITY_ORDER.__getitem__)
-    summaries = {
-        "critical": "Live credentials or infrastructure secrets would have left the network.",
-        "high": "Regulated PII or bearer tokens would have reached a third-party model.",
-        "medium": "Personal identifiers present; redaction required for compliance.",
-        "low": "Low-sensitivity identifiers present.",
-    }
-    return {"level": worst.upper(), "score": score, "summary": summaries[worst]}
-
-
 def _segments(text: str, findings: List[Finding], sanitized: bool) -> List[Dict[str, Any]]:
     """Split text into plain and finding segments so the UI never has to map offsets."""
     out: List[Dict[str, Any]] = []
@@ -71,6 +56,22 @@ def _segments(text: str, findings: List[Finding], sanitized: bool) -> List[Dict[
     if cursor < len(text):
         out.append({"t": text[cursor:]})
     return out
+
+
+def regulatory_exposure(findings: List[Finding]) -> List[Dict[str, Any]]:
+    """Frameworks implicated by the findings, most severe first, then by volume."""
+    agg: Dict[str, Dict[str, Any]] = {}
+    for f in findings:
+        name = COMPLIANCE_IMPACT.get(f.detector)
+        if not name:
+            continue
+        entry = agg.setdefault(name, {"framework": name, "findings": 0, "severity": f.severity, "detectors": []})
+        entry["findings"] += 1
+        if SEVERITY_ORDER[f.severity] < SEVERITY_ORDER[entry["severity"]]:
+            entry["severity"] = f.severity
+        if f.detector not in entry["detectors"]:
+            entry["detectors"].append(f.detector)
+    return sorted(agg.values(), key=lambda e: (SEVERITY_ORDER[e["severity"]], -e["findings"], e["framework"]))
 
 
 def analyze(text: str, source_name: str) -> Dict[str, Any]:
@@ -90,11 +91,12 @@ def analyze(text: str, source_name: str) -> Dict[str, Any]:
             "secrets_blocked": by_cat["credential"] + by_cat["infrastructure"],
             "pii_redacted": by_cat["pii"],
             "by_severity": dict(Counter(f.severity for f in findings)),
-            "risk": _risk(findings),
+            "risk": risk_assessment(findings),
+            "regulatory": regulatory_exposure(findings),
         },
         "findings": [
             {"detector": f.detector, "category": f.category, "severity": f.severity,
-             "line": f.line, "masked": f.masked}
+             "line": f.line, "masked": f.masked, "regulation": COMPLIANCE_IMPACT.get(f.detector, "")}
             for f in findings
         ],
         "raw_segments": _segments(text, findings, sanitized=False),
@@ -116,7 +118,7 @@ def health() -> Dict[str, Any]:
 @app.get("/api/detectors")
 def detectors() -> List[Dict[str, str]]:
     return [{"name": d.name, "category": d.category, "severity": d.severity,
-             "description": d.description} for d in DETECTORS]
+             "description": d.description, "regulation": COMPLIANCE_IMPACT.get(d.name, "")} for d in DETECTORS]
 
 
 @app.get("/api/samples")

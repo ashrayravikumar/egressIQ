@@ -152,7 +152,7 @@ textarea::placeholder { color: var(--text-3); }
 .toggle input:focus-visible + span { outline: 2px solid var(--brand); outline-offset: 2px; }
 
 /* ── KPIs ────────────────────────────────────────────── */
-.kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, 1.35fr); gap: 14px; }
+.kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, 1.3fr) minmax(0, 1.55fr); gap: 14px; }
 .kpi {
   position: relative; background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 16px 18px; overflow: hidden;
@@ -311,8 +311,14 @@ mark.flash { animation: flash 1s ease-out; }
 mark.masked { letter-spacing: .02em; }
 
 /* ── Responsive ──────────────────────────────────────── */
+@media (max-width: 1280px) {
+  .kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .kpi-risk { grid-column: span 1; }
+  .kpi-reg { grid-column: span 2; }
+}
 @media (max-width: 1100px) {
   .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpi-reg { grid-column: 1 / -1; }
 }
 @media (max-width: 820px) {
   .diff { grid-template-columns: minmax(0, 1fr); }
@@ -330,4 +336,39 @@ mark.masked { letter-spacing: .02em; }
 .is-masked .pane-raw .pane-title::after {
   content: "masked"; font: 600 10px var(--mono); text-transform: uppercase; letter-spacing: .05em;
   color: var(--brand); background: rgba(56, 189, 248, .1); padding: 1px 6px; border-radius: 4px;
+}
+
+/* ── Regulatory exposure ─────────────────────────────── */
+:root { --reg: #a78bfa; }
+.kpi-reg::before { background: var(--reg); }
+.kpi-reg[data-state="clear"]::before { background: var(--ok); }
+.reg-head { display: flex; align-items: baseline; gap: 8px; }
+.kpi-reg .kpi-value { color: var(--reg); }
+.kpi-reg[data-state="clear"] .kpi-value { color: var(--ok); }
+.reg-unit { font-size: 12px; color: var(--text-3); }
+.reg-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 5px; }
+.reg-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.reg-list .reg-count { font: 600 11px var(--mono); color: var(--text-3); flex: none; }
+.reg-clear { display: none; }
+.kpi-reg[data-state="clear"] .reg-clear { display: block; }
+.kpi-reg[data-state="clear"] .reg-list { display: none; }
+
+.reg-pill {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%;
+  font: 600 11px/1.5 var(--sans); letter-spacing: .01em; white-space: nowrap;
+  padding: 1px 8px 1px 7px; border-radius: 6px;
+  color: #ddd6fe; background: rgba(167, 139, 250, .10); border: 1px solid rgba(167, 139, 250, .32);
+}
+.reg-pill span { overflow: hidden; text-overflow: ellipsis; }
+.reg-pill::before {
+  content: ""; width: 6px; height: 6px; border-radius: 2px; flex: none; background: var(--sev, var(--reg));
+}
+.reg-pill.reg-critical { --sev: var(--crit); }
+.reg-pill.reg-high { --sev: var(--high); }
+.reg-pill.reg-medium { --sev: var(--med); }
+.reg-pill.reg-low { --sev: var(--low); }
+.findings td.reg { padding-top: 6px; padding-bottom: 6px; }
+/* Five-across layout: reserve two label lines so every KPI number sits on the same baseline. */
+@media (min-width: 1281px) {
+  .kpi-label { min-height: 3em; }
 }

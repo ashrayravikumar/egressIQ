@@ -18,6 +18,7 @@
     rawPane: $("raw-pane"), cleanPane: $("clean-pane"), rawBadge: $("raw-badge"), cleanBadge: $("clean-badge"),
     findingsBody: $("findings-body"), findingsCount: $("findings-count"),
     engineText: $("engine-text"), enginePill: $("engine-pill"), toast: $("toast"), host: $("host"),
+    kpiReg: $("kpi-reg"), regCount: $("reg-count"), regUnit: $("reg-unit"), regList: $("reg-list"),
     maskBtn: $("mask-btn"), unmaskBtn: $("unmask-btn"), maskedBody: $("masked-body"),
   };
   const MASK_KEY = "egressiq.maskRaw";
@@ -94,9 +95,10 @@
           const cls = sanitized ? "redacted" : "sev-" + f.severity + (state.masked ? " masked" : "");
           const m = node("mark", cls, piece.t);
           m.dataset.f = piece.f;
+          const reg = f.regulation ? ` · ${f.regulation}` : "";
           m.title = sanitized
-            ? `${f.detector} redacted (${f.severity})`
-            : `${f.detector} · ${f.severity} · ${f.category}`;
+            ? `${f.detector} redacted (${f.severity})${reg}`
+            : `${f.detector} · ${f.severity} · ${f.category}${reg}`;
           code.appendChild(m);
         }
       }
@@ -110,6 +112,27 @@
     }
   }
 
+  function regPill(framework, severity) {
+    const pill = node("span", "reg-pill reg-" + severity);
+    pill.appendChild(node("span", null, framework));
+    pill.title = "Compliance standard implicated: " + framework;
+    return pill;
+  }
+
+  function renderRegulatory(reg) {
+    el.kpiReg.dataset.state = reg.length ? "exposed" : "clear";
+    animateNumber(el.regCount, reg.length);
+    el.regUnit.textContent = reg.length === 1 ? "framework implicated" : "frameworks implicated";
+    const frag = document.createDocumentFragment();
+    for (const r of reg) {
+      const li = node("li");
+      li.title = `${r.framework}: ${r.findings} finding(s) from ${r.detectors.join(", ")}`;
+      li.append(regPill(r.framework, r.severity), node("span", "reg-count", `×${r.findings}`));
+      frag.appendChild(li);
+    }
+    el.regList.replaceChildren(frag);
+  }
+
   function renderFindings(findings) {
     const frag = document.createDocumentFragment();
     findings.forEach((f, i) => {
@@ -117,7 +140,9 @@
       tr.dataset.f = i;
       tr.tabIndex = 0;
       const sev = node("td"); sev.appendChild(node("span", "sev sev-" + f.severity, f.severity));
-      tr.append(sev, node("td", "det", f.detector), node("td", "cat", f.category),
+      const reg = node("td", "reg");
+      if (f.regulation) reg.appendChild(regPill(f.regulation, f.severity));
+      tr.append(sev, node("td", "det", f.detector), reg, node("td", "cat", f.category),
         node("td", "num", String(f.line)), node("td", "mono", f.masked));
       frag.appendChild(tr);
     });
@@ -148,6 +173,7 @@
     el.rawBadge.classList.toggle("is-zero", s.total === 0);
     el.cleanBadge.textContent = s.total ? `${s.total} redacted · safe to forward` : "Safe to forward";
     renderFindings(r.findings);
+    renderRegulatory(s.regulatory || []);
 
     el.scanMeta.replaceChildren();
     const meta = [

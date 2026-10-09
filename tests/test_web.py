@@ -56,8 +56,34 @@ def test_scan_segments_and_kpis():
     assert all(AWS_KEY not in f["masked"] for f in r["findings"])
 
 
+def test_scan_includes_regulatory_impact():
+    r = client.post("/api/scan", json={"text": LOG}).json()
+    assert {f["detector"]: f["regulation"] for f in r["findings"]} == {
+        "EMAIL_ADDRESS": "GDPR / CCPA PII",
+        "AWS_ACCESS_KEY_ID": "SOC 2 CC6.6 (Secrets Exposure)",
+        "DB_CONNECTION_STRING": "SOC 2 CC6.6 (Secrets Exposure)",
+    }
+    reg = r["stats"]["regulatory"]
+    assert [(e["framework"], e["findings"], e["severity"]) for e in reg] == [
+        ("SOC 2 CC6.6 (Secrets Exposure)", 2, "critical"),
+        ("GDPR / CCPA PII", 1, "medium"),
+    ]
+    assert reg[0]["detectors"] == ["AWS_ACCESS_KEY_ID", "DB_CONNECTION_STRING"]
+
+
+def test_regulatory_covers_pci_and_ssn():
+    r = client.post("/api/scan", json={"text": "ssn 123-45-6789 card 4111 1111 1111 1111"}).json()
+    names = {e["framework"] for e in r["stats"]["regulatory"]}
+    assert names == {"SOC 2 CC6.1 / GLBA", "PCI-DSS 4.0 §3.4"}
+
+
+def test_detectors_endpoint_lists_regulation():
+    assert all(d["regulation"] for d in client.get("/api/detectors").json())
+
+
 def test_scan_clean_text():
     r = client.post("/api/scan", json={"text": "hello world"}).json()
+    assert r["stats"]["regulatory"] == []
     assert r["stats"]["total"] == 0
     assert r["stats"]["risk"]["level"] == "CLEAR"
     assert _join(r["clean_segments"]) == "hello world"

@@ -146,6 +146,21 @@ DETECTORS: List[Detector] = [
 
 DETECTORS_BY_NAME: Dict[str, Detector] = {d.name: d for d in DETECTORS}
 
+# Compliance standard implicated when each detector fires. Reporting metadata only:
+# scan()/redact() never read it. tests/test_compliance.py requires an entry per detector.
+_SECRETS_EXPOSURE = "SOC 2 CC6.6 (Secrets Exposure)"
+COMPLIANCE_IMPACT: Dict[str, str] = {
+    "CREDIT_CARD": "PCI-DSS 4.0 §3.4",
+    "US_SSN": "SOC 2 CC6.1 / GLBA",
+    "EMAIL_ADDRESS": "GDPR / CCPA PII",
+    "AWS_ACCESS_KEY_ID": _SECRETS_EXPOSURE,
+    "AWS_SECRET_ACCESS_KEY": _SECRETS_EXPOSURE,
+    "GITHUB_TOKEN": _SECRETS_EXPOSURE,
+    "JWT": _SECRETS_EXPOSURE,
+    "PRIVATE_KEY": _SECRETS_EXPOSURE,
+    "DB_CONNECTION_STRING": _SECRETS_EXPOSURE,
+}
+
 
 def _line_index(text: str) -> List[int]:
     starts = [0]
