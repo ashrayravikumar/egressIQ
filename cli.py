@@ -5,6 +5,7 @@ Examples:
     python cli.py --file app.log --dry-run            # sanitized text -> stdout
     python cli.py --file app.log --export-pdf         # egressiq_audit_report.pdf
     cat prompt.txt | python cli.py --dry-run          # read from stdin
+    python cli.py web [--port 8000] [--open]          # launch the demo web UI
 """
 
 from __future__ import annotations
@@ -46,6 +47,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["web"]:
+        try:
+            from web.server import run
+        except ImportError as exc:
+            print(f"egressiq: web UI needs extra dependencies ({exc.name}); "
+                  "install with: pip install -e '.[web]'", file=sys.stderr)
+            return 2
+        return run(argv[1:])
+
     args = build_parser().parse_args(argv)
 
     if args.file and args.file != "-":

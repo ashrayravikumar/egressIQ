@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EgressIQ · GenAI Egress DLP</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2 4 7v8c0 7.5 5.1 13.6 12 15 6.9-1.4 12-7.5 12-15V7z' fill='%2338bdf8'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <path d="M16 2 4 7v8c0 7.5 5.1 13.6 12 15 6.9-1.4 12-7.5 12-15V7z" fill="currentColor" opacity=".18"/>
+        <path d="M16 2 4 7v8c0 7.5 5.1 13.6 12 15 6.9-1.4 12-7.5 12-15V7z" fill="none" stroke="currentColor" stroke-width="1.8"/>
+        <path d="m11 16 3.5 3.5L21.5 12" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div>
+        <div class="brand-name">EgressIQ</div>
+        <div class="brand-sub">GenAI Egress DLP Console</div>
+      </div>
+    </div>
+    <div class="topbar-status">
+      <span class="pill pill-live" id="engine-pill"><span class="dot"></span><span id="engine-text">Connecting…</span></span>
+      <span class="pill" title="Payloads are processed in memory on this machine">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 7V5a4 4 0 1 1 8 0v2h.5A1.5 1.5 0 0 1 14 8.5v5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 13.5v-5A1.5 1.5 0 0 1 3.5 7zm1.5 0h5V5a2.5 2.5 0 0 0-5 0z" fill="currentColor"/></svg>
+        Local mode · data never leaves this machine
+      </span>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- Input -->
+    <section class="card input-card" id="input-card" aria-labelledby="input-title">
+      <div class="card-head">
+        <div class="card-title-row">
+          <h2 id="input-title">Egress payload</h2>
+          <span class="chip" id="source-chip" title="Source name used in the audit report">pasted-input.txt</span>
+        </div>
+        <div class="head-actions">
+          <div class="samples" id="samples" role="group" aria-label="Sample payloads"></div>
+          <label class="btn btn-ghost" for="file-input">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5 3.75 5.75l1.06 1.06L7.25 4.37V11h1.5V4.37l2.44 2.44 1.06-1.06zM2.5 12.5v1.75h11V12.5H15V15a.75.75 0 0 1-.75.75H1.75A.75.75 0 0 1 1 15v-2.5z" fill="currentColor"/></svg>
+            Upload file
+          </label>
+          <input type="file" id="file-input" accept=".txt,.json,.csv,.log" hidden>
+        </div>
+      </div>
+
+      <div class="editor">
+        <textarea id="payload" spellcheck="false" autocomplete="off" aria-label="Payload to scan"
+          placeholder="Paste a prompt, log, or config here — or drop a .log, .txt, .json or .csv file."></textarea>
+        <div class="drop-overlay" id="drop-overlay" aria-hidden="true">
+          <div class="drop-inner">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0-12-4.5 4.5M12 3l4.5 4.5M4 15v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <strong>Drop to scan</strong>
+            <span>.log · .txt · .json · .csv — up to 5 MB</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card-foot">
+        <span class="hint">
+          <label class="toggle"><input type="checkbox" id="live-toggle" checked><span></span>Live scan</label>
+          <span class="sep">·</span> Drag &amp; drop files anywhere on this panel
+        </span>
+        <button class="btn btn-primary" id="scan-btn" type="button">
+          Scan &amp; redact <kbd id="scan-kbd">⌘↵</kbd>
+        </button>
+      </div>
+    </section>
+
+    <!-- KPIs -->
+    <section class="kpis" aria-label="Executive summary">
+      <article class="kpi">
+        <div class="kpi-label">Total findings</div>
+        <div class="kpi-value" id="kpi-total">0</div>
+        <div class="kpi-sub" id="kpi-total-sub">Across all detectors</div>
+      </article>
+      <article class="kpi kpi-crit">
+        <div class="kpi-label">Critical secrets blocked</div>
+        <div class="kpi-value" id="kpi-secrets">0</div>
+        <div class="kpi-sub">Credentials, keys &amp; DB strings</div>
+      </article>
+      <article class="kpi kpi-pii">
+        <div class="kpi-label">PII redacted</div>
+        <div class="kpi-value" id="kpi-pii">0</div>
+        <div class="kpi-sub">Emails, SSNs &amp; card numbers</div>
+      </article>
+      <article class="kpi kpi-risk" id="kpi-risk" data-level="CLEAR">
+        <div class="kpi-label">Overall risk level</div>
+        <div class="risk-row">
+          <div class="kpi-value risk-level" id="risk-level">CLEAR</div>
+          <div class="risk-score"><span id="risk-score">0</span><small>/100</small></div>
+        </div>
+        <div class="meter" aria-hidden="true"><span id="risk-meter"></span></div>
+        <div class="kpi-sub" id="risk-summary">No sensitive data detected. Safe for egress.</div>
+      </article>
+    </section>
+
+    <!-- Action bar -->
+    <div class="actionbar">
+      <div class="scan-meta" id="scan-meta">Waiting for input…</div>
+      <div class="actions">
+        <button class="btn btn-ghost" id="copy-btn" type="button">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 1.75C5 .78 5.78 0 6.75 0h7.5C15.22 0 16 .78 16 1.75v7.5c0 .97-.78 1.75-1.75 1.75h-7.5C5.78 11 5 10.22 5 9.25zm1.75-.25a.25.25 0 0 0-.25.25v7.5c0 .14.11.25.25.25h7.5c.14 0 .25-.11.25-.25v-7.5a.25.25 0 0 0-.25-.25zM1.75 5H3.5v1.5H1.75a.25.25 0 0 0-.25.25v7.5c0 .14.11.25.25.25h7.5c.14 0 .25-.11.25-.25V12.5H11v1.75c0 .97-.78 1.75-1.75 1.75h-7.5C.78 16 0 15.22 0 14.25v-7.5C0 5.78.78 5 1.75 5" fill="currentColor"/></svg>
+          Copy sanitized
+        </button>
+        <button class="btn btn-cta" id="pdf-btn" type="button">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 11.5 3.75 7.25l1.06-1.06 2.44 2.44V1h1.5v7.63l2.44-2.44 1.06 1.06zM2.5 12.5v1.75h11V12.5H15V15a.75.75 0 0 1-.75.75H1.75A.75.75 0 0 1 1 15v-2.5z" fill="currentColor"/></svg>
+          <span>Download Executive Audit PDF</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Diff -->
+    <section class="diff" aria-label="Side-by-side comparison">
+      <div class="pane pane-raw">
+        <div class="pane-head">
+          <span class="pane-title"><span class="dot dot-crit"></span>Raw egress payload</span>
+          <span class="pane-badge badge-crit" id="raw-badge">0 leaks</span>
+        </div>
+        <div class="pane-body" id="raw-pane" tabindex="0" aria-label="Raw payload with detected leaks highlighted"></div>
+      </div>
+      <div class="pane pane-clean">
+        <div class="pane-head">
+          <span class="pane-title"><span class="dot dot-ok"></span>Sanitized · proxy-ready</span>
+          <span class="pane-badge badge-ok" id="clean-badge">Safe to forward</span>
+        </div>
+        <div class="pane-body" id="clean-pane" tabindex="0" aria-label="Sanitized payload"></div>
+      </div>
+    </section>
+    <div class="legend">
+      <span><i class="sw sw-critical"></i>Critical</span>
+      <span><i class="sw sw-high"></i>High</span>
+      <span><i class="sw sw-medium"></i>Medium</span>
+      <span><i class="sw sw-redacted"></i>Redacted token</span>
+      <span class="legend-hint">Hover a highlight or a row below to trace it across both panes.</span>
+    </div>
+
+    <!-- Findings -->
+    <section class="card" aria-labelledby="findings-title">
+      <div class="card-head">
+        <div class="card-title-row">
+          <h2 id="findings-title">Findings</h2>
+          <span class="chip" id="findings-count">0</span>
+        </div>
+        <span class="hint">Values are masked — raw secrets never appear in reports.</span>
+      </div>
+      <div class="table-wrap">
+        <table class="findings">
+          <thead><tr><th>Severity</th><th>Detector</th><th>Category</th><th class="num">Line</th><th>Masked preview</th></tr></thead>
+          <tbody id="findings-body"></tbody>
+        </table>
+        <div class="empty" id="findings-empty">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 4 5.5v6c0 5 3.4 9.4 8 10.5 4.6-1.1 8-5.5 8-10.5v-6z" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="m8.5 12 2.5 2.5 4.5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <div><strong>Clean payload.</strong> Nothing to redact — this request can be forwarded as-is.</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    EgressIQ · Zero-trust egress sanitization for LLM traffic · Processed in-memory on <span id="host"></span>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

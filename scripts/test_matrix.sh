@@ -11,7 +11,8 @@ failed=()
 for v in "${versions[@]}"; do
   printf '%-6s ' "$v"
   if out=$(uv run --quiet --isolated --no-project --python "$v" \
-        --with 'reportlab>=4.0' --with 'pytest>=7.0' \
+        --with 'reportlab>=4.0' --with 'pytest>=7.0' --with 'httpx>=0.24' \
+        --with 'fastapi>=0.100' --with 'uvicorn>=0.23' --with 'python-multipart>=0.0.6' \
         python -m pytest -q -p no:cacheprovider 2>&1); then
     echo "$out" | tail -1
   else

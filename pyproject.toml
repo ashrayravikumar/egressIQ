@@ -20,14 +20,21 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=7.0"]
+test = ["pytest>=7.0", "httpx>=0.24"]
+web = ["fastapi>=0.100", "uvicorn>=0.23", "python-multipart>=0.0.6"]
 
 [project.scripts]
 egressiq = "cli:main_entry"
 
 [tool.setuptools]
 py-modules = ["scanner", "report", "cli"]
+packages = ["web"]
+
+[tool.setuptools.package-data]
+web = ["static/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# Third-party notice from starlette.testclient (test-only dependency).
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient`"]

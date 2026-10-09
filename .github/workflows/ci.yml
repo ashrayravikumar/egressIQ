@@ -42,7 +42,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e '.[test]'
+          python -m pip install -e '.[test,web]'
 
       - name: Test
         run: python -m pytest -q -W error::DeprecationWarning
@@ -55,3 +55,13 @@ jobs:
           grep -q '\[REDACTED:US_SSN\]' sanitized.txt
           if grep -q 'jane.doe@example.com' sanitized.txt; then echo "raw PII leaked"; exit 1; fi
           head -c 4 smoke.pdf | grep -q '%PDF'
+
+      - name: Web UI smoke test
+        run: |
+          egressiq web --port 8765 > web.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8765/api/health && break; sleep 1; done
+          printf 'key=%s\n' "AKIA""IOSFODNN7EXAMPLE" > drop.log
+          curl -sf -F file=@drop.log http://127.0.0.1:8765/api/upload | grep -q '"secrets_blocked":1'
+          curl -sf -H 'Content-Type: application/json' -d '{"text":"ssn 123-45-6789"}' \
+            http://127.0.0.1:8765/api/report -o web.pdf
+          head -c 4 web.pdf | grep -q '%PDF'
