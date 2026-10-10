@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import threading
+from bisect import bisect_right
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Pattern, Tuple
 
@@ -32,6 +33,11 @@ class Detector:
     group: int = 0  # capture group holding the sensitive value
     validator: Optional[Callable[[str], bool]] = None
     compliance: str = ""  # framework label for reports (scan() ignores it)
+    # Cheap gates checked before the regex runs; the detector is skipped when they fail.
+    # Every match must contain one of `hints` and match `prefilter`, or findings are lost.
+    hints: Tuple[str, ...] = ()  # any one must occur in the text (lowercased when hints_ignore_case)
+    hints_ignore_case: bool = False
+    prefilter: Optional[Pattern[str]] = None  # fast regex (literal/charset first) that must match somewhere
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,11 @@ _DB_SCHEMES = (
     r"postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|mssql|sqlserver"
     r"|oracle|cockroachdb|clickhouse|amqps?|snowflake"
 )
+# Every scheme spelling _DB_SCHEMES accepts, as "<scheme>://" (tests check the two stay in sync).
+_DB_URI_HINTS = [
+    f"{s}://" for s in ("postgres", "postgresql", "mysql", "mariadb", "mongodb", "mongodb+srv", "redis", "rediss",
+                        "mssql", "sqlserver", "oracle", "cockroachdb", "clickhouse", "amqp", "amqps", "snowflake")
+]
 
 # NANP: area code and exchange start 2-9; parenthesised area code optional.
 _NANP_AREA = r"(?:\([2-9]\d{2}\)[-. ]?|[2-9]\d{2}[-. ]?)"
@@ -93,7 +104,9 @@ DEFAULT_RULES: Dict[str, Any] = {
             "name": "AWS_ACCESS_KEY_ID",
             "category": "credential",
             "severity": "critical",
-            "pattern": r"\b(?:AKIA|ASIA|ABIA|ACCA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|APKA|A3T[A-Z0-9])[A-Z0-9]{16}\b",
+            # Same matches as \b(?:AKIA|ASIA|...)…, but starting with a literal lets the regex engine skip
+            # straight to each "A"; (?<!\wA) is the leading word boundary.
+            "pattern": r"A(?<!\wA)(?:KIA|SIA|BIA|CCA|GPA|IDA|ROA|IPA|NPA|NVA|PKA|3T[A-Z0-9])[A-Z0-9]{16}\b",
             "description": "AWS access key ID (long-term AKIA or temporary ASIA, etc.)",
             "compliance": _SECRETS_EXPOSURE,
         },
@@ -102,10 +115,13 @@ DEFAULT_RULES: Dict[str, Any] = {
             "category": "credential",
             "severity": "critical",
             "pattern": (
-                r"(?i)(?:(?:aws_?)?secret_?access_?key|aws_?secret_?key)[\"']?\s*[:=]\s*[\"']?"
+                # (?=[as]) rejects most positions with one check (every match starts "aws" or "secret").
+                r"(?i)(?=[as])(?:(?:aws_?)?secret_?access_?key|aws_?secret_?key)[\"']?\s*[:=]\s*[\"']?"
                 r"([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+])"
             ),
             "group": 1,
+            "hints": ["secret"],
+            "hints_ignore_case": True,
             "description": "AWS secret access key assigned to a recognisable key name",
             "compliance": _SECRETS_EXPOSURE,
         },
@@ -113,7 +129,7 @@ DEFAULT_RULES: Dict[str, Any] = {
             "name": "GITHUB_TOKEN",
             "category": "credential",
             "severity": "critical",
-            "pattern": r"\b(?:(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{82,255})\b",
+            "pattern": r"g(?<!\wg)(?:h[pousr]_[A-Za-z0-9]{36,255}|ithub_pat_[A-Za-z0-9_]{82,255})\b",
             "description": "GitHub classic (ghp/gho/ghu/ghs/ghr) or fine-grained (github_pat_) token",
             "compliance": _SECRETS_EXPOSURE,
         },
@@ -121,7 +137,7 @@ DEFAULT_RULES: Dict[str, Any] = {
             "name": "JWT",
             "category": "credential",
             "severity": "high",
-            "pattern": r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]*",
+            "pattern": r"e(?<![A-Za-z0-9_-]e)yJ[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]*",
             "description": "JSON Web Token (header.payload.signature; unsigned alg=none included)",
             "compliance": _SECRETS_EXPOSURE,
         },
@@ -130,6 +146,7 @@ DEFAULT_RULES: Dict[str, Any] = {
             "category": "credential",
             "severity": "critical",
             "pattern": r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----",
+            "hints": ["-----BEGIN"],
             "description": "PEM-encoded private key block",
             "compliance": _SECRETS_EXPOSURE,
         },
@@ -141,6 +158,8 @@ DEFAULT_RULES: Dict[str, Any] = {
                 rf"(?i)\b(?:jdbc:)?(?:{_DB_SCHEMES})://[^\s'\"<>`]+"
                 r"|\b(?:Server|Data Source|Host)=[^;\r\n]+;[^\r\n]*?(?:Password|Pwd)=[^;\r\n]+;?"
             ),
+            "hints": [*_DB_URI_HINTS, "password=", "pwd="],
+            "hints_ignore_case": True,
             "description": "Database URI or ADO.NET-style connection string",
             "compliance": _SECRETS_EXPOSURE,
         },
@@ -149,6 +168,7 @@ DEFAULT_RULES: Dict[str, Any] = {
             "category": "pii",
             "severity": "medium",
             "pattern": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b",
+            "hints": ["@"],
             "description": "Email address",
             "compliance": "GDPR / CCPA PII",
         },
@@ -159,12 +179,17 @@ DEFAULT_RULES: Dict[str, Any] = {
             # Group 1: optional phone-ish key (phone=, "mobile": , tel:). When present,
             # compact digits are accepted; bare 10-digit runs without a key or "+1"
             # are too often order IDs/timestamps to flag.
+            # (?=…) lists every possible first character (key letters, "+", "(", digits), so most
+            # positions are rejected with one check instead of trying the whole alternation.
             "pattern": (
+                r"(?=[PpMmCcFfTt+(1-9])"
                 rf"(?:({_PHONE_KEY})|(?<![\w+.-]))"
                 rf"((?(1){_NANP_KEYED}|(?:{_NANP_PLUS}|{_NANP_SEPARATED})))"
                 r"(?![\w-]|\.\d)"
             ),
             "group": 2,
+            # Every form contains area code + exchange: "415-555", "(415) 555", "4155550198".
+            "prefilter": r"[2-9]\d\d\)?[-. ]?[2-9]\d\d",
             "description": "North American phone number (formatted, +1 E.164, or compact after a phone/tel key)",
             "compliance": "GDPR / CCPA PII",
         },
@@ -173,6 +198,7 @@ DEFAULT_RULES: Dict[str, Any] = {
             "category": "pii",
             "severity": "high",
             "pattern": r"\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b",
+            "prefilter": r"-\d\d-\d{4}",  # literal "-" first; dates like 2026-10-08 don't pass
             "description": "US Social Security Number (dashed format)",
             "compliance": "SOC 2 CC6.1 / GLBA",
         },
@@ -180,8 +206,9 @@ DEFAULT_RULES: Dict[str, Any] = {
             "name": "CREDIT_CARD",
             "category": "pii",
             "severity": "high",
-            "pattern": r"(?<![\d-])(?:\d[ -]?){12,18}\d(?![\d-])",
+            "pattern": r"(?=\d)(?<![\d-])(?:\d[ -]?){12,18}\d(?![\d-])",
             "validator": "luhn",
+            "prefilter": r"\d(?:[ -]?\d){12}",  # 13+ digits, single separators allowed
             "description": "Payment card number (13-19 digits, Luhn-validated)",
             "compliance": "PCI-DSS 4.0 Req 4.2 / 3.4",
         },
@@ -189,7 +216,8 @@ DEFAULT_RULES: Dict[str, Any] = {
 }
 
 CATEGORIES = ("credential", "pii", "infrastructure")
-_RULE_KEYS = {"name", "category", "severity", "pattern", "description", "group", "validator", "compliance"}
+_RULE_KEYS = {"name", "category", "severity", "pattern", "description", "group", "validator", "compliance",
+              "hints", "hints_ignore_case", "prefilter"}
 _FILE_KEYS = {"version", "extends_defaults", "disable", "detectors"}
 _NAME_RE = re.compile(r"[A-Z][A-Z0-9_]{1,31}")  # shown in [REDACTED:NAME] tokens and fixed-width PDF columns
 _MAX_COMPLIANCE_LEN = 40
@@ -250,6 +278,20 @@ def _compile_rule(spec: Dict[str, Any]) -> Detector:
     compliance = spec.get("compliance") or "Custom policy"
     if not isinstance(compliance, str) or len(compliance) > _MAX_COMPLIANCE_LEN:
         raise RulesError(f"{where}: compliance must be a string of at most {_MAX_COMPLIANCE_LEN} chars")
+    hints = spec.get("hints", [])
+    if not isinstance(hints, list) or not all(isinstance(h, str) and h for h in hints):
+        raise RulesError(f"{where}: hints must be a list of non-empty strings")
+    ignore_case = spec.get("hints_ignore_case", False)
+    if not isinstance(ignore_case, bool):
+        raise RulesError(f"{where}: hints_ignore_case must be true or false")
+    prefilter = None
+    if spec.get("prefilter") is not None:
+        if not isinstance(spec["prefilter"], str):
+            raise RulesError(f"{where}: prefilter must be a string")
+        try:
+            prefilter = re.compile(spec["prefilter"])
+        except re.error as exc:
+            raise RulesError(f"{where}: invalid prefilter regex: {exc}") from None
     return Detector(
         name=name,
         category=spec["category"],
@@ -259,6 +301,9 @@ def _compile_rule(spec: Dict[str, Any]) -> Detector:
         group=group,
         validator=VALIDATORS[validator_name] if validator_name else None,
         compliance=compliance,
+        hints=tuple(h.lower() for h in hints) if ignore_case else tuple(hints),
+        hints_ignore_case=ignore_case,
+        prefilter=prefilter,
     )
 
 
@@ -305,8 +350,10 @@ def _merge(doc: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
         name = rule.get("name")
         if name in merged:
             base = merged[name]
-            if "pattern" in rule and "group" not in rule:
-                base = {k: v for k, v in base.items() if k != "group"}  # a new pattern has its own groups
+            if "pattern" in rule:
+                # A new pattern has its own groups, and the old pattern's gates may not cover it.
+                base = {k: v for k, v in base.items()
+                        if k not in ("group", "hints", "hints_ignore_case", "prefilter") or k in rule}
             merged[name] = {**base, **rule}
         else:
             merged[str(name)] = dict(rule)
@@ -437,24 +484,41 @@ def scan(text: str, detectors: Optional[List[Detector]] = None) -> List[Finding]
     """
     detectors = DETECTORS if detectors is None else detectors
     candidates: List[Finding] = []
-    starts = _line_index(text)
+    starts: Optional[List[int]] = None
+    lowered: Optional[str] = None
     for det in detectors:
+        if det.hints:
+            if det.hints_ignore_case:
+                lowered = text.lower() if lowered is None else lowered
+                haystack = lowered
+            else:
+                haystack = text
+            if not any(h in haystack for h in det.hints):
+                continue
+        if det.prefilter is not None and det.prefilter.search(text) is None:
+            continue
         for m in det.pattern.finditer(text):
             value = m.group(det.group)
             if not value or (det.validator and not det.validator(value)):
                 continue
             s, e = m.span(det.group)
+            starts = _line_index(text) if starts is None else starts
             candidates.append(
                 Finding(det.name, det.category, det.severity, s, e, _line_of(starts, s), value)
             )
 
+    # Highest priority first; keep a candidate only if it overlaps nothing kept so far.
+    # Kept findings are disjoint, so only the neighbours by start can overlap: O(k log k).
     candidates.sort(key=lambda f: (SEVERITY_ORDER[f.severity], -(f.end - f.start), f.start))
-    chosen: List[Finding] = []
+    kept_starts: List[int] = []
+    kept: List[Finding] = []
     for f in candidates:
-        if all(f.end <= c.start or f.start >= c.end for c in chosen):
-            chosen.append(f)
-    chosen.sort(key=lambda f: f.start)
-    return chosen
+        i = bisect_right(kept_starts, f.start)
+        if (i and kept[i - 1].end > f.start) or (i < len(kept) and kept[i].start < f.end):
+            continue
+        kept_starts.insert(i, f.start)
+        kept.insert(i, f)
+    return kept
 
 
 def redact(

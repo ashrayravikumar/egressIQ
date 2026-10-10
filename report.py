@@ -7,6 +7,7 @@ cli.py imports this module lazily, so the scan / --dry-run path never loads repo
 from __future__ import annotations
 
 import hashlib
+import json
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -21,7 +22,7 @@ from reportlab.platypus import (
     Flowable, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
-from scanner import COMPLIANCE_IMPACT, SEVERITY_ORDER, Finding
+from scanner import COMPLIANCE_IMPACT, SEVERITY_ORDER, Finding, RuleSet, load_rules
 
 MAX_DETAIL_ROWS = 500
 
@@ -97,6 +98,34 @@ def regulatory_exposure(
     return sorted(agg.values(), key=lambda e: (SEVERITY_ORDER[e["severity"]], -e["findings"], e["framework"]))
 
 
+AUDIT_HASH_SCHEME = "egressiq-audit-v1"
+
+
+def audit_record(
+    findings: Sequence[Finding], source_text: str, rules: Optional[RuleSet] = None,
+    generated_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Tamper-evidence record for one report: inputs plus their SHA-256 audit hash.
+
+    The hash covers the report time, ruleset version, payload SHA-256 and every
+    finding's detector/severity/line/offsets, as canonical JSON. It never covers raw
+    values or hashes of them (short values such as SSNs would be brute-forceable).
+    Anyone holding the payload can rescan with the same ruleset and recompute it.
+    """
+    rules = load_rules() if rules is None else rules
+    when = (generated_at or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+    record: Dict[str, Any] = {
+        "scheme": AUDIT_HASH_SCHEME,
+        "generated_at": when.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "ruleset_version": rules.version,
+        "source_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+        "findings": [[f.detector, f.severity, f.line, f.start, f.end] for f in findings],
+    }
+    canonical = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    record["audit_hash"] = hashlib.sha256(canonical.encode("ascii")).hexdigest()
+    return record
+
+
 # ── Text styles ──────────────────────────────────────────────────────────
 def _style(name: str, **kw: Any) -> ParagraphStyle:
     # Defaults apply only to root styles; a style with a parent inherits everything it doesn't override.
@@ -165,7 +194,7 @@ class SeverityBadge(Flowable):
 class HeaderBanner(Flowable):
     def __init__(self, width: float, meta: List[tuple]):
         super().__init__()
-        self.width, self.height, self.meta = width, 104, meta
+        self.width, self.height, self.meta = width, 120, meta
 
     def wrap(self, aw: float, ah: float):
         return self.width, self.height
@@ -214,7 +243,7 @@ class HeaderBanner(Flowable):
             c.setFillColor(colors.white)
             c.setFont("Helvetica", 8.5)
             c.drawString(mx, y - 10, _fit(value, "Helvetica", 8.5, max_val_w))
-            y -= 21
+            y -= 19
         c.setStrokeColor(colors.HexColor("#1E293B"))
         c.setLineWidth(0.6)
         c.line(mx - 14, 14, mx - 14, h - 16)
@@ -450,6 +479,7 @@ def _remediation_box(findings: List[Finding], compliance: Mapping[str, str]) -> 
 
 
 def _footer(canvas: Any, doc: Any) -> None:
+    record = doc.egressiq_audit
     canvas.saveState()
     canvas.setStrokeColor(BORDER)
     canvas.setLineWidth(0.5)
@@ -458,22 +488,39 @@ def _footer(canvas: Any, doc: Any) -> None:
     canvas.setFillColor(MUTED)
     canvas.drawString(MARGIN, 28, "EgressIQ Audit Report  ·  Confidential  ·  Values masked; raw secrets are never stored in this report")
     canvas.drawRightString(letter[0] - MARGIN, 28, f"Page {doc.page}")
+    canvas.setFont("Helvetica-Bold", 6.3)
+    canvas.drawString(MARGIN, 17, "AUDIT HASH (SHA-256)")
+    label_w = stringWidth("AUDIT HASH (SHA-256)", "Helvetica-Bold", 6.3) + 6
+    canvas.setFont("Courier", 6.6)
+    canvas.drawString(MARGIN + label_w, 17, record["audit_hash"])
+    canvas.setFont("Helvetica", 6.3)
+    canvas.drawRightString(letter[0] - MARGIN, 17, f"{record['generated_at']}  ·  {AUDIT_HASH_SCHEME}")
     canvas.restoreState()
 
 
 def build_pdf(
     findings: List[Finding], source_name: str, source_text: str, out_path: str,
-    compliance: Optional[Mapping[str, str]] = None,
+    compliance: Optional[Mapping[str, str]] = None, rules: Optional[RuleSet] = None,
+    record: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Write the audit PDF. compliance: detector -> framework (default: built-in mapping)."""
-    compliance = COMPLIANCE_IMPACT if compliance is None else compliance
+    """Write the audit PDF.
+
+    rules: the RuleSet that produced the findings (default: built-in); sets the
+    ruleset version and, unless compliance is given, the framework mapping.
+    record: an audit_record() for these findings, when the caller also needs the
+    audit hash (e.g. to log it outside the PDF); built here otherwise.
+    """
+    rules = load_rules() if rules is None else rules
+    compliance = rules.compliance if compliance is None else compliance
+    record = audit_record(findings, source_text, rules) if record is None else record
     risk = risk_assessment(findings)
-    digest = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+    generated = datetime.strptime(record["generated_at"], "%Y-%m-%dT%H:%M:%SZ")
     lines = source_text.count("\n") + (1 if source_text and not source_text.endswith("\n") else 0)
     meta = [
-        ("Scan date", datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC")),
+        ("Scan date", generated.strftime("%d %b %Y, %H:%M UTC")),
         ("Target file", source_name),
-        ("SHA-256", f"{digest[:24]}…"),
+        ("Ruleset", f"EgressIQ Ruleset v{rules.version}"),
+        ("SHA-256", f"{record['source_sha256'][:24]}…"),
         ("Payload", f"{len(source_text):,} characters · {lines:,} line{'s' if lines != 1 else ''}"),
     ]
 
@@ -494,9 +541,12 @@ def build_pdf(
         "· 0 Clear. The most severe finding sets the band; finding volume raises the score within it.",
         S_SMALL)]
 
-    SimpleDocTemplate(
+    doc = SimpleDocTemplate(
         out_path, pagesize=letter, title="EgressIQ Audit Report", author="EgressIQ",
         subject=f"GenAI egress audit: {source_name}",
+        keywords=f"audit_hash={record['audit_hash']}",
         leftMargin=MARGIN - FRAME_PAD, rightMargin=MARGIN - FRAME_PAD, topMargin=44, bottomMargin=56,
-    ).build(story, onFirstPage=_footer, onLaterPages=_footer)
+    )
+    doc.egressiq_audit = record
+    doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
     return out_path

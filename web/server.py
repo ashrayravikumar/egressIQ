@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from report import build_pdf, regulatory_exposure, risk_assessment
+from report import audit_record, build_pdf, regulatory_exposure, risk_assessment
 from scanner import Finding, RuleSet, load_rules, redact, scan
 from web.samples import SAMPLES
 
@@ -146,7 +146,8 @@ def report(req: ScanRequest) -> Response:
     findings = scan(req.text, rules.detectors)
     with tempfile.TemporaryDirectory(prefix="egressiq-") as tmp:
         path = os.path.join(tmp, "report.pdf")
-        build_pdf(findings, source, req.text, path, compliance=rules.compliance)
+        record = audit_record(findings, req.text, rules)
+        build_pdf(findings, source, req.text, path, rules=rules, record=record)
         with open(path, "rb") as fh:
             pdf = fh.read()
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(source).stem).strip("-") or "payload"
@@ -154,7 +155,11 @@ def report(req: ScanRequest) -> Response:
     return Response(
         pdf,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store"},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"', "Cache-Control": "no-store",
+                 # So GRC tooling can store the hash outside the PDF (that's what makes it tamper-evident).
+                 "X-EgressIQ-Audit-Hash": record["audit_hash"],
+                 "X-EgressIQ-Generated-At": record["generated_at"],
+                 "X-EgressIQ-Ruleset": rules.version},
     )
 
 

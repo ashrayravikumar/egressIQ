@@ -98,10 +98,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         _print_summary(findings, source, sys.stdout)
 
     if args.export_pdf:
-        from report import build_pdf
+        from report import audit_record, build_pdf
 
-        path = build_pdf(findings, source, text, args.export_pdf, compliance=rules.compliance)
+        record = audit_record(findings, text, rules)
+        path = build_pdf(findings, source, text, args.export_pdf, rules=rules, record=record)
         print(f"EgressIQ: audit report written to {path}", file=sys.stderr)
+        print(f"EgressIQ: audit hash {record['audit_hash']} (generated {record['generated_at']}, "
+              f"ruleset {record['ruleset_version']})", file=sys.stderr)
 
     return 1 if args.fail_on_findings and findings else 0
 
