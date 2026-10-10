@@ -22,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from report import build_pdf, regulatory_exposure, risk_assessment
-from scanner import COMPLIANCE_IMPACT, DETECTORS, Finding, redact, scan
+from scanner import Finding, RuleSet, load_rules, redact, scan
 from web.samples import SAMPLES
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -31,6 +31,9 @@ MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_SOURCE = "pasted-input.txt"
 
 app = FastAPI(title="EgressIQ", docs_url=None, redoc_url=None)
+
+# Compiled once at startup and kept hot: every request reuses these regexes. run() swaps in --rules.
+RULES: RuleSet = load_rules(os.environ.get("EGRESSIQ_RULES"))
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
@@ -60,7 +63,8 @@ def _segments(text: str, findings: List[Finding], sanitized: bool) -> List[Dict[
 
 def analyze(text: str, source_name: str) -> Dict[str, Any]:
     t0 = time.perf_counter()
-    findings = scan(text)
+    rules = RULES
+    findings = scan(text, rules.detectors)
     clean, _ = redact(text, findings)
     elapsed_ms = (time.perf_counter() - t0) * 1000
 
@@ -76,11 +80,11 @@ def analyze(text: str, source_name: str) -> Dict[str, Any]:
             "pii_redacted": by_cat["pii"],
             "by_severity": dict(Counter(f.severity for f in findings)),
             "risk": risk_assessment(findings),
-            "regulatory": regulatory_exposure(findings),
+            "regulatory": regulatory_exposure(findings, rules.compliance),
         },
         "findings": [
             {"detector": f.detector, "category": f.category, "severity": f.severity,
-             "line": f.line, "masked": f.masked, "regulation": COMPLIANCE_IMPACT.get(f.detector, "")}
+             "line": f.line, "masked": f.masked, "regulation": rules.compliance.get(f.detector, "")}
             for f in findings
         ],
         "raw_segments": _segments(text, findings, sanitized=False),
@@ -96,13 +100,17 @@ def index() -> FileResponse:
 
 @app.get("/api/health")
 def health() -> Dict[str, Any]:
-    return {"status": "ok", "detectors": len(DETECTORS)}
+    rules = RULES
+    # File names only: full server paths aren't the client's business. Errors read "<path>: <reason>".
+    errors = [os.path.basename(path) + ": " + reason for path, _, reason in (e.partition(": ") for e in rules.errors)]
+    return {"status": "ok", "detectors": len(rules.detectors), "rules_version": rules.version,
+            "rules_source": os.path.basename(rules.source), "rules_errors": errors}
 
 
 @app.get("/api/detectors")
 def detectors() -> List[Dict[str, str]]:
     return [{"name": d.name, "category": d.category, "severity": d.severity,
-             "description": d.description, "regulation": COMPLIANCE_IMPACT.get(d.name, "")} for d in DETECTORS]
+             "description": d.description, "regulation": d.compliance} for d in RULES.detectors]
 
 
 @app.get("/api/samples")
@@ -134,10 +142,11 @@ def upload(file: UploadFile = File(...)) -> Dict[str, Any]:
 def report(req: ScanRequest) -> Response:
     _check_size(req.text)
     source = req.source_name or DEFAULT_SOURCE
-    findings = scan(req.text)
+    rules = RULES
+    findings = scan(req.text, rules.detectors)
     with tempfile.TemporaryDirectory(prefix="egressiq-") as tmp:
         path = os.path.join(tmp, "report.pdf")
-        build_pdf(findings, source, req.text, path)
+        build_pdf(findings, source, req.text, path, compliance=rules.compliance)
         with open(path, "rb") as fh:
             pdf = fh.read()
     stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(source).stem).strip("-") or "payload"
@@ -154,13 +163,21 @@ def run(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--host", default=os.environ.get("EGRESSIQ_HOST", "127.0.0.1"),
                    help="bind address (default: $EGRESSIQ_HOST or 127.0.0.1, local only)")
     p.add_argument("--port", type=int, default=8000, help="port (default: 8000)")
+    p.add_argument("--rules", metavar="PATH", default=os.environ.get("EGRESSIQ_RULES"),
+                   help="JSON/YAML rule file merged over the built-in detectors (default: $EGRESSIQ_RULES)")
     p.add_argument("--open", action="store_true", help="open the UI in your default browser")
     args = p.parse_args(argv)
+
+    from cli import load_rules_or_warn
+
+    global RULES
+    RULES = load_rules_or_warn(args.rules)
 
     import uvicorn
 
     url = f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{args.port}"
     print(f"EgressIQ web UI running at {url}  (Ctrl+C to stop)")
+    print(f"Rules {RULES.version}: {len(RULES.detectors)} detectors from {RULES.source}")
     if args.open:
         import threading
         import webbrowser

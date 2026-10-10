@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 from collections import Counter
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 from xml.sax.saxutils import escape
 
 from reportlab.lib import colors
@@ -21,7 +21,7 @@ from reportlab.platypus import (
     Flowable, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
 )
 
-from scanner import COMPLIANCE_IMPACT, DETECTORS_BY_NAME, SEVERITY_ORDER, Finding
+from scanner import COMPLIANCE_IMPACT, SEVERITY_ORDER, Finding
 
 MAX_DETAIL_ROWS = 500
 
@@ -75,11 +75,17 @@ def risk_assessment(findings: Sequence[Finding]) -> Dict[str, Any]:
             "summary": RISK_SUMMARIES[worst]}
 
 
-def regulatory_exposure(findings: Sequence[Finding]) -> List[Dict[str, Any]]:
-    """Frameworks implicated by the findings, most severe first, then by volume."""
+def regulatory_exposure(
+    findings: Sequence[Finding], compliance: Optional[Mapping[str, str]] = None
+) -> List[Dict[str, Any]]:
+    """Frameworks implicated by the findings, most severe first, then by volume.
+
+    compliance maps detector -> framework; pass RuleSet.compliance for custom rules.
+    """
+    compliance = COMPLIANCE_IMPACT if compliance is None else compliance
     agg: Dict[str, Dict[str, Any]] = {}
     for f in findings:
-        name = COMPLIANCE_IMPACT.get(f.detector)
+        name = compliance.get(f.detector)
         if not name:
             continue
         entry = agg.setdefault(name, {"framework": name, "findings": 0, "severity": f.severity, "detectors": []})
@@ -280,7 +286,7 @@ def _data_table(rows: List[list], widths: Sequence[float], numeric_cols: Sequenc
     return t
 
 
-def _risk_box(findings: List[Finding], risk: Dict[str, Any]) -> Table:
+def _risk_box(findings: List[Finding], risk: Dict[str, Any], compliance: Mapping[str, str]) -> Table:
     by_sev = Counter(f.severity for f in findings)
     by_cat = Counter(f.category for f in findings)
     detectors = len({f.detector for f in findings})
@@ -304,7 +310,7 @@ def _risk_box(findings: List[Finding], risk: Dict[str, Any]) -> Table:
         [[stat(len(findings), "Total findings"),
           stat(by_cat["credential"] + by_cat["infrastructure"], "Secrets blocked"),
           stat(by_cat["pii"], "PII redacted"),
-          stat(len(regulatory_exposure(findings)), "Frameworks hit")]],
+          stat(len(regulatory_exposure(findings, compliance)), "Frameworks hit")]],
         colWidths=[(CONTENT_W - 150 - 28) / 4] * 4, hAlign="LEFT",
     )
     stats.setStyle(TableStyle([
@@ -336,17 +342,17 @@ def _risk_box(findings: List[Finding], risk: Dict[str, Any]) -> Table:
     return box
 
 
-def _detector_table(findings: List[Finding]) -> Table:
+def _detector_table(findings: List[Finding], compliance: Mapping[str, str]) -> Table:
     by_det = Counter(f.detector for f in findings)
+    severity = {f.detector: f.severity for f in findings}  # from findings, so custom rules work too
     total = len(findings)
     rows: List[list] = [[Paragraph(h, s) for h, s in (
         ("DETECTOR", S_TH), ("STATUTORY IMPACT", S_TH), ("SEVERITY", S_TH), ("FINDINGS", S_TH_R), ("SHARE", S_TH_R))]]
     for name, count in sorted(
-        by_det.items(), key=lambda kv: (SEVERITY_ORDER[DETECTORS_BY_NAME[kv[0]].severity], -kv[1], kv[0])
+        by_det.items(), key=lambda kv: (SEVERITY_ORDER[severity[kv[0]]], -kv[1], kv[0])
     ):
-        d = DETECTORS_BY_NAME[name]
-        rows.append([Paragraph(name, S_TD), Paragraph(escape(COMPLIANCE_IMPACT.get(name, "")), S_TD_REG),
-                     SeverityBadge(d.severity), Paragraph(str(count), S_TD_R),
+        rows.append([Paragraph(name, S_TD), Paragraph(escape(compliance.get(name, "")), S_TD_REG),
+                     SeverityBadge(severity[name]), Paragraph(str(count), S_TD_R),
                      Paragraph(f"{100 * count / total:.0f}%", S_TD_R)])
     return _data_table(rows, (140, 160, 80, 60, 64))
 
@@ -360,7 +366,7 @@ def _detail_table(findings: List[Finding]) -> Table:
     return _data_table(rows, DETAIL_COL_WIDTHS)
 
 
-def _remediation_box(findings: List[Finding]) -> KeepTogether:
+def _remediation_box(findings: List[Finding], compliance: Mapping[str, str]) -> KeepTogether:
     n = len(findings)
     gate = '<font face="Courier">egressiq --fail-on-findings</font>'
     if n:
@@ -406,14 +412,18 @@ def _remediation_box(findings: List[Finding]) -> KeepTogether:
                              status_row, Spacer(1, 10), pitch, Spacer(1, 10), steps_t]
 
     if n:
-        secret_detectors = {d for d, det in DETECTORS_BY_NAME.items() if det.category != "pii"}
+        secret_detectors = {f.detector for f in findings if f.category != "pii"}
         rows: List[list] = [[Paragraph(h, s) for h, s in (
             ("FRAMEWORK", S_TH), ("FINDINGS", S_TH_R), ("DETECTORS", S_TH), ("RECOMMENDED CONTROL", S_TH))]]
-        for e in regulatory_exposure(findings):
+        w = CONTENT_W - 28
+        badge_max = w * 0.37 - 12  # framework column minus cell padding
+        for e in regulatory_exposure(findings, compliance):
             control = ("Rotate + redact before egress" if secret_detectors & set(e["detectors"])
                        else "Redact before egress")
+            # Custom rule files can name long frameworks; keep the badge inside its column.
+            label = _fit(e["framework"].upper(), "Helvetica-Bold", 6.8, badge_max - 14)
             rows.append([
-                Table([[SeverityBadge(e["severity"], e["framework"], width=_badge_w(e["framework"]))]],
+                Table([[SeverityBadge(e["severity"], label, width=_badge_w(label))]],
                       style=[("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
                              ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)],
                       hAlign="LEFT"),
@@ -421,7 +431,6 @@ def _remediation_box(findings: List[Finding]) -> KeepTogether:
                 Paragraph(", ".join(e["detectors"]), S_TD_SMALL),
                 Paragraph(control, S_TD),
             ])
-        w = CONTENT_W - 28
         inner += [Spacer(1, 12), _data_table(rows, (w * 0.37, w * 0.12, w * 0.30, w * 0.21))]
 
     next_step = (f"rotate the exposed credentials above, then add {gate} to CI so new exposures fail the "
@@ -452,7 +461,12 @@ def _footer(canvas: Any, doc: Any) -> None:
     canvas.restoreState()
 
 
-def build_pdf(findings: List[Finding], source_name: str, source_text: str, out_path: str) -> str:
+def build_pdf(
+    findings: List[Finding], source_name: str, source_text: str, out_path: str,
+    compliance: Optional[Mapping[str, str]] = None,
+) -> str:
+    """Write the audit PDF. compliance: detector -> framework (default: built-in mapping)."""
+    compliance = COMPLIANCE_IMPACT if compliance is None else compliance
     risk = risk_assessment(findings)
     digest = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
     lines = source_text.count("\n") + (1 if source_text and not source_text.endswith("\n") else 0)
@@ -463,11 +477,11 @@ def build_pdf(findings: List[Finding], source_name: str, source_text: str, out_p
         ("Payload", f"{len(source_text):,} characters · {lines:,} line{'s' if lines != 1 else ''}"),
     ]
 
-    story: List[Flowable] = [HeaderBanner(CONTENT_W, meta), Spacer(1, 16), _risk_box(findings, risk)]
+    story: List[Flowable] = [HeaderBanner(CONTENT_W, meta), Spacer(1, 16), _risk_box(findings, risk, compliance)]
 
     if findings:
         story += [Spacer(1, 20), *_section("Findings by Detector", "Grouped by detection rule, most severe first.")]
-        story += [_detector_table(findings), Spacer(1, 20)]
+        story += [_detector_table(findings, compliance), Spacer(1, 20)]
         story += _section("Finding Detail (masked)",
                           "Each finding with its source line. Previews show only the first characters of each value.")
         story.append(_detail_table(findings))
@@ -475,7 +489,7 @@ def build_pdf(findings: List[Finding], source_name: str, source_text: str, out_p
             story += [Spacer(1, 6), Paragraph(
                 f"Detail truncated: showing {MAX_DETAIL_ROWS:,} of {len(findings):,} findings.", S_SMALL)]
 
-    story += [Spacer(1, 20), _remediation_box(findings), Spacer(1, 8), Paragraph(
+    story += [Spacer(1, 20), _remediation_box(findings, compliance), Spacer(1, 8), Paragraph(
         "Risk score bands: 75–99 Critical · 50–74 High · 25–49 Medium · 1–24 Low "
         "· 0 Clear. The most severe finding sets the band; finding volume raises the score within it.",
         S_SMALL)]

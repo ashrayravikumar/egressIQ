@@ -1,16 +1,23 @@
 """EgressIQ scanner: detect and redact sensitive data in GenAI egress traffic.
 
-Detectors are registered in DETECTORS. Each is a precompiled regex plus an
-optional validator (e.g. Luhn for card numbers). To add a detector, append a
-Detector to DETECTORS and add positive/negative samples in tests/samples.py;
-tests/test_patterns.py fails if a detector has no samples.
+Built-in detectors live in DEFAULT_RULES (the same shape as a --rules JSON/YAML
+file). load_rules() compiles them, or a custom file merged over them, into a
+RuleSet once; scan() then just runs the precompiled regexes. To add a built-in
+detector, append it to DEFAULT_RULES and add positive/negative samples in
+tests/samples.py; tests/test_patterns.py fails if a detector has no samples.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import re
+import threading
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Pattern, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Pattern, Tuple
+
+if TYPE_CHECKING:
+    from concurrent.futures import Future
 
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 
@@ -24,6 +31,7 @@ class Detector:
     description: str
     group: int = 0  # capture group holding the sensitive value
     validator: Optional[Callable[[str], bool]] = None
+    compliance: str = ""  # framework label for reports (scan() ignores it)
 
 
 @dataclass(frozen=True)
@@ -71,118 +79,337 @@ _NANP_SEPARATED = r"(?:1[-. ])?(?:\([2-9]\d{2}\)[-. ]?|[2-9]\d{2}[-. ])[2-9]\d{2
 _NANP_KEYED = rf"(?:\+?1[-. ]?)?{_NANP_AREA}[2-9]\d{{2}}[-. ]?\d{{4}}"
 _PHONE_KEY = r"(?i:phone|mobile|\bcell|fax|\btel)[\w.-]*[\"']?\s*[:=]\s*[\"']?"
 
-DETECTORS: List[Detector] = [
-    Detector(
-        name="AWS_ACCESS_KEY_ID",
-        category="credential",
-        severity="critical",
-        pattern=re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|APKA|A3T[A-Z0-9])[A-Z0-9]{16}\b"),
-        description="AWS access key ID (long-term AKIA or temporary ASIA, etc.)",
-    ),
-    Detector(
-        name="AWS_SECRET_ACCESS_KEY",
-        category="credential",
-        severity="critical",
-        pattern=re.compile(
-            r"(?i)(?:(?:aws_?)?secret_?access_?key|aws_?secret_?key)[\"']?\s*[:=]\s*[\"']?"
-            r"([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+])"
-        ),
-        group=1,
-        description="AWS secret access key assigned to a recognisable key name",
-    ),
-    Detector(
-        name="GITHUB_TOKEN",
-        category="credential",
-        severity="critical",
-        pattern=re.compile(
-            r"\b(?:(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{82,255})\b"
-        ),
-        description="GitHub classic (ghp/gho/ghu/ghs/ghr) or fine-grained (github_pat_) token",
-    ),
-    Detector(
-        name="JWT",
-        category="credential",
-        severity="high",
-        pattern=re.compile(
-            r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]*"
-        ),
-        description="JSON Web Token (header.payload.signature; unsigned alg=none included)",
-    ),
-    Detector(
-        name="PRIVATE_KEY",
-        category="credential",
-        severity="critical",
-        pattern=re.compile(
-            r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----"
-        ),
-        description="PEM-encoded private key block",
-    ),
-    Detector(
-        name="DB_CONNECTION_STRING",
-        category="infrastructure",
-        severity="critical",
-        pattern=re.compile(
-            rf"(?i)\b(?:jdbc:)?(?:{_DB_SCHEMES})://[^\s'\"<>`]+"
-            r"|\b(?:Server|Data Source|Host)=[^;\r\n]+;[^\r\n]*?(?:Password|Pwd)=[^;\r\n]+;?"
-        ),
-        description="Database URI or ADO.NET-style connection string",
-    ),
-    Detector(
-        name="EMAIL_ADDRESS",
-        category="pii",
-        severity="medium",
-        pattern=re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b"),
-        description="Email address",
-    ),
-    Detector(
-        name="PHONE_NUMBER",
-        category="pii",
-        severity="medium",
-        pattern=re.compile(
+_SECRETS_EXPOSURE = "SOC 2 CC6.6 (Secrets Exposure)"
+
+# Validators referenced by name from rule files (code can't live in YAML/JSON).
+VALIDATORS: Dict[str, Callable[[str], bool]] = {"luhn": _luhn_valid}
+
+# Built-in policy, in the same shape a --rules file uses. "compliance" is reporting
+# metadata only: scan()/redact() never read it.
+DEFAULT_RULES: Dict[str, Any] = {
+    "version": "2026.10.0",
+    "detectors": [
+        {
+            "name": "AWS_ACCESS_KEY_ID",
+            "category": "credential",
+            "severity": "critical",
+            "pattern": r"\b(?:AKIA|ASIA|ABIA|ACCA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|APKA|A3T[A-Z0-9])[A-Z0-9]{16}\b",
+            "description": "AWS access key ID (long-term AKIA or temporary ASIA, etc.)",
+            "compliance": _SECRETS_EXPOSURE,
+        },
+        {
+            "name": "AWS_SECRET_ACCESS_KEY",
+            "category": "credential",
+            "severity": "critical",
+            "pattern": (
+                r"(?i)(?:(?:aws_?)?secret_?access_?key|aws_?secret_?key)[\"']?\s*[:=]\s*[\"']?"
+                r"([A-Za-z0-9/+]{40})(?![A-Za-z0-9/+])"
+            ),
+            "group": 1,
+            "description": "AWS secret access key assigned to a recognisable key name",
+            "compliance": _SECRETS_EXPOSURE,
+        },
+        {
+            "name": "GITHUB_TOKEN",
+            "category": "credential",
+            "severity": "critical",
+            "pattern": r"\b(?:(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{82,255})\b",
+            "description": "GitHub classic (ghp/gho/ghu/ghs/ghr) or fine-grained (github_pat_) token",
+            "compliance": _SECRETS_EXPOSURE,
+        },
+        {
+            "name": "JWT",
+            "category": "credential",
+            "severity": "high",
+            "pattern": r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]{2,}\.[A-Za-z0-9_-]*",
+            "description": "JSON Web Token (header.payload.signature; unsigned alg=none included)",
+            "compliance": _SECRETS_EXPOSURE,
+        },
+        {
+            "name": "PRIVATE_KEY",
+            "category": "credential",
+            "severity": "critical",
+            "pattern": r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----",
+            "description": "PEM-encoded private key block",
+            "compliance": _SECRETS_EXPOSURE,
+        },
+        {
+            "name": "DB_CONNECTION_STRING",
+            "category": "infrastructure",
+            "severity": "critical",
+            "pattern": (
+                rf"(?i)\b(?:jdbc:)?(?:{_DB_SCHEMES})://[^\s'\"<>`]+"
+                r"|\b(?:Server|Data Source|Host)=[^;\r\n]+;[^\r\n]*?(?:Password|Pwd)=[^;\r\n]+;?"
+            ),
+            "description": "Database URI or ADO.NET-style connection string",
+            "compliance": _SECRETS_EXPOSURE,
+        },
+        {
+            "name": "EMAIL_ADDRESS",
+            "category": "pii",
+            "severity": "medium",
+            "pattern": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}\b",
+            "description": "Email address",
+            "compliance": "GDPR / CCPA PII",
+        },
+        {
+            "name": "PHONE_NUMBER",
+            "category": "pii",
+            "severity": "medium",
             # Group 1: optional phone-ish key (phone=, "mobile": , tel:). When present,
             # compact digits are accepted; bare 10-digit runs without a key or "+1"
             # are too often order IDs/timestamps to flag.
-            rf"(?:({_PHONE_KEY})|(?<![\w+.-]))"
-            rf"((?(1){_NANP_KEYED}|(?:{_NANP_PLUS}|{_NANP_SEPARATED})))"
-            r"(?![\w-]|\.\d)"
-        ),
-        group=2,
-        description="North American phone number (formatted, +1 E.164, or compact after a phone/tel key)",
-    ),
-    Detector(
-        name="US_SSN",
-        category="pii",
-        severity="high",
-        pattern=re.compile(r"\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b"),
-        description="US Social Security Number (dashed format)",
-    ),
-    Detector(
-        name="CREDIT_CARD",
-        category="pii",
-        severity="high",
-        pattern=re.compile(r"(?<![\d-])(?:\d[ -]?){12,18}\d(?![\d-])"),
-        validator=_luhn_valid,
-        description="Payment card number (13-19 digits, Luhn-validated)",
-    ),
-]
-
-DETECTORS_BY_NAME: Dict[str, Detector] = {d.name: d for d in DETECTORS}
-
-# Compliance standard implicated when each detector fires. Reporting metadata only:
-# scan()/redact() never read it. tests/test_compliance.py requires an entry per detector.
-_SECRETS_EXPOSURE = "SOC 2 CC6.6 (Secrets Exposure)"
-COMPLIANCE_IMPACT: Dict[str, str] = {
-    "CREDIT_CARD": "PCI-DSS 4.0 Req 4.2 / 3.4",
-    "US_SSN": "SOC 2 CC6.1 / GLBA",
-    "EMAIL_ADDRESS": "GDPR / CCPA PII",
-    "PHONE_NUMBER": "GDPR / CCPA PII",
-    "AWS_ACCESS_KEY_ID": _SECRETS_EXPOSURE,
-    "AWS_SECRET_ACCESS_KEY": _SECRETS_EXPOSURE,
-    "GITHUB_TOKEN": _SECRETS_EXPOSURE,
-    "JWT": _SECRETS_EXPOSURE,
-    "PRIVATE_KEY": _SECRETS_EXPOSURE,
-    "DB_CONNECTION_STRING": _SECRETS_EXPOSURE,
+            "pattern": (
+                rf"(?:({_PHONE_KEY})|(?<![\w+.-]))"
+                rf"((?(1){_NANP_KEYED}|(?:{_NANP_PLUS}|{_NANP_SEPARATED})))"
+                r"(?![\w-]|\.\d)"
+            ),
+            "group": 2,
+            "description": "North American phone number (formatted, +1 E.164, or compact after a phone/tel key)",
+            "compliance": "GDPR / CCPA PII",
+        },
+        {
+            "name": "US_SSN",
+            "category": "pii",
+            "severity": "high",
+            "pattern": r"\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b",
+            "description": "US Social Security Number (dashed format)",
+            "compliance": "SOC 2 CC6.1 / GLBA",
+        },
+        {
+            "name": "CREDIT_CARD",
+            "category": "pii",
+            "severity": "high",
+            "pattern": r"(?<![\d-])(?:\d[ -]?){12,18}\d(?![\d-])",
+            "validator": "luhn",
+            "description": "Payment card number (13-19 digits, Luhn-validated)",
+            "compliance": "PCI-DSS 4.0 Req 4.2 / 3.4",
+        },
+    ],
 }
+
+CATEGORIES = ("credential", "pii", "infrastructure")
+_RULE_KEYS = {"name", "category", "severity", "pattern", "description", "group", "validator", "compliance"}
+_FILE_KEYS = {"version", "extends_defaults", "disable", "detectors"}
+_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]{1,31}")  # shown in [REDACTED:NAME] tokens and fixed-width PDF columns
+_MAX_COMPLIANCE_LEN = 40
+
+log = logging.getLogger("egressiq.rules")
+log.addHandler(logging.NullHandler())  # library: callers decide how to surface warnings
+
+
+class RulesError(ValueError):
+    """A rule file could not be read, parsed or validated."""
+
+
+@dataclass(frozen=True)
+class RuleSet:
+    """A compiled, ready-to-scan policy. Build with load_rules(); reuse it for every scan."""
+
+    version: str
+    detectors: List[Detector]
+    source: str = "built-in"
+    errors: Tuple[str, ...] = ()  # why a custom file was rejected (we fell back to defaults)
+
+    @property
+    def by_name(self) -> Dict[str, Detector]:
+        return {d.name: d for d in self.detectors}
+
+    @property
+    def compliance(self) -> Dict[str, str]:
+        return {d.name: d.compliance for d in self.detectors}
+
+
+def _compile_rule(spec: Dict[str, Any]) -> Detector:
+    name = spec.get("name")
+    where = f"rule {name!r}" if name else "rule"
+    unknown = set(spec) - _RULE_KEYS
+    if unknown:
+        raise RulesError(f"{where}: unknown field(s) {', '.join(sorted(unknown))}")
+    if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
+        raise RulesError(f"{where}: name must be 2-32 chars of A-Z, 0-9, _ starting with a letter")
+    missing = [k for k in ("category", "severity", "pattern") if not spec.get(k)]
+    if missing:
+        raise RulesError(f"{where}: missing {', '.join(missing)}")
+    if spec["category"] not in CATEGORIES:
+        raise RulesError(f"{where}: category must be one of {', '.join(CATEGORIES)}")
+    if spec["severity"] not in SEVERITY_ORDER:
+        raise RulesError(f"{where}: severity must be one of {', '.join(SEVERITY_ORDER)}")
+    if not isinstance(spec["pattern"], str):
+        raise RulesError(f"{where}: pattern must be a string")
+    try:
+        pattern = re.compile(spec["pattern"])
+    except re.error as exc:
+        raise RulesError(f"{where}: invalid regex: {exc}") from None
+    group = spec.get("group", 0)
+    if not isinstance(group, int) or isinstance(group, bool) or not 0 <= group <= pattern.groups:
+        raise RulesError(f"{where}: group {group!r} out of range (pattern has {pattern.groups} groups)")
+    validator_name = spec.get("validator")
+    if validator_name is not None and validator_name not in VALIDATORS:
+        raise RulesError(f"{where}: unknown validator {validator_name!r} (available: {', '.join(VALIDATORS)})")
+    compliance = spec.get("compliance") or "Custom policy"
+    if not isinstance(compliance, str) or len(compliance) > _MAX_COMPLIANCE_LEN:
+        raise RulesError(f"{where}: compliance must be a string of at most {_MAX_COMPLIANCE_LEN} chars")
+    return Detector(
+        name=name,
+        category=spec["category"],
+        severity=spec["severity"],
+        pattern=pattern,
+        description=str(spec.get("description") or name),
+        group=group,
+        validator=VALIDATORS[validator_name] if validator_name else None,
+        compliance=compliance,
+    )
+
+
+def _parse_file(path: str) -> Dict[str, Any]:
+    with open(path, encoding="utf-8") as fh:
+        raw = fh.read()
+    if path.lower().endswith((".yaml", ".yml")):
+        try:
+            import yaml  # optional: pip install 'egressiq[yaml]'
+        except ImportError:
+            raise RulesError("YAML rule files need PyYAML: pip install 'egressiq[yaml]' (or use JSON)") from None
+        try:
+            doc = yaml.safe_load(raw)
+        except yaml.YAMLError as exc:
+            raise RulesError(f"invalid YAML: {exc}") from None
+    else:
+        try:
+            doc = json.loads(raw)
+        except ValueError as exc:
+            raise RulesError(f"invalid JSON: {exc}") from None
+    if not isinstance(doc, dict):
+        raise RulesError("rule file must be a mapping with a 'detectors' list")
+    return doc
+
+
+def _merge(doc: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
+    unknown = set(doc) - _FILE_KEYS
+    if unknown:
+        raise RulesError(f"unknown top-level field(s) {', '.join(sorted(unknown))}")
+    custom = doc.get("detectors", [])
+    disable = doc.get("disable", [])
+    extends = doc.get("extends_defaults", True)
+    if not isinstance(custom, list) or not all(isinstance(r, dict) for r in custom):
+        raise RulesError("'detectors' must be a list of mappings")
+    if not isinstance(disable, list) or not all(isinstance(n, str) for n in disable):
+        raise RulesError("'disable' must be a list of detector names")
+    if not isinstance(extends, bool):
+        raise RulesError("'extends_defaults' must be true or false")
+
+    merged: Dict[str, Dict[str, Any]] = {}
+    if extends:
+        merged = {r["name"]: dict(r) for r in DEFAULT_RULES["detectors"]}
+    for rule in custom:
+        name = rule.get("name")
+        if name in merged:
+            base = merged[name]
+            if "pattern" in rule and "group" not in rule:
+                base = {k: v for k, v in base.items() if k != "group"}  # a new pattern has its own groups
+            merged[name] = {**base, **rule}
+        else:
+            merged[str(name)] = dict(rule)
+    for name in disable:
+        if name not in merged:
+            raise RulesError(f"cannot disable unknown detector {name!r}")
+        del merged[name]
+    if not merged:
+        raise RulesError("policy has no detectors left")
+
+    version = doc.get("version")
+    if version is None:
+        version = f"{DEFAULT_RULES['version']}+custom" if extends else "custom"
+    return str(version), list(merged.values())
+
+
+def _build(version: str, specs: List[Dict[str, Any]], source: str) -> RuleSet:
+    return RuleSet(version=version, detectors=[_compile_rule(s) for s in specs], source=source)
+
+
+_DEFAULT_RULESET = _build(DEFAULT_RULES["version"], DEFAULT_RULES["detectors"], "built-in")
+
+
+def load_rules(source: Optional[str] = None, strict: bool = False) -> RuleSet:
+    """Return a compiled RuleSet. Every regex is compiled here, once, never per scan.
+
+    source=None gives the built-in defaults (cached, free to call repeatedly).
+    A JSON or YAML path is merged over the defaults: rules whose name matches a
+    default override only the fields they set; new names add detectors;
+    `disable: [NAME]` removes one; `extends_defaults: false` drops all defaults.
+
+    A file that can't be read, parsed or validated is rejected as a whole (never
+    half-applied). With strict=False the built-in defaults are returned, the
+    problem is logged, and RuleSet.errors says why; strict=True raises RulesError.
+    """
+    if source is None:
+        return _DEFAULT_RULESET
+    try:
+        version, specs = _merge(_parse_file(source))
+        return _build(version, specs, source)
+    except (OSError, RulesError) as exc:
+        message = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+        message = f"{source}: {message}"
+        if strict:
+            raise RulesError(message) from None
+        log.warning("ignoring rule file, using built-in rules: %s", message)
+        return RuleSet(_DEFAULT_RULESET.version, _DEFAULT_RULESET.detectors, "built-in", (message,))
+
+
+# Module-level defaults, kept for callers that predate load_rules().
+DETECTORS: List[Detector] = _DEFAULT_RULESET.detectors
+DETECTORS_BY_NAME: Dict[str, Detector] = _DEFAULT_RULESET.by_name
+# tests/test_compliance.py requires an entry per detector.
+COMPLIANCE_IMPACT: Dict[str, str] = _DEFAULT_RULESET.compliance
+
+
+def _version_key(version: str) -> Tuple[int, ...]:
+    return tuple(int(n) for n in re.findall(r"\d+", version))
+
+
+_update_executor: Any = None
+_update_lock = threading.Lock()
+
+
+def check_rule_updates(url: str, current_version: str, timeout: float = 5.0) -> "Future[Optional[Dict[str, Any]]]":
+    """Ask a rules endpoint whether a newer policy exists, without blocking the caller.
+
+    Returns a concurrent.futures.Future immediately; the HTTP GET runs on a single
+    background thread, never on a scan thread. The Future resolves to the endpoint's
+    JSON manifest (which must include "version") when it is newer than
+    current_version, else None. Failures resolve to None and are logged; they never
+    raise. Only a version check: nothing is downloaded or applied, and no scan data
+    is sent. HTTPS is required except for localhost.
+    """
+    global _update_executor
+    from concurrent.futures import ThreadPoolExecutor
+
+    with _update_lock:
+        if _update_executor is None:
+            _update_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="egressiq-rules")
+    return _update_executor.submit(_fetch_update, url, current_version, timeout)
+
+
+def _fetch_update(url: str, current_version: str, timeout: float) -> Optional[Dict[str, Any]]:
+    import urllib.parse
+    import urllib.request
+
+    parts = urllib.parse.urlsplit(url)
+    if not (parts.scheme == "https" or (parts.scheme == "http" and parts.hostname in ("localhost", "127.0.0.1", "::1"))):
+        log.warning("rule update check skipped: %s is not an https URL", url)
+        return None
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "egressiq-rules"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (scheme checked above)
+            manifest = json.loads(resp.read(64 * 1024))
+        remote = manifest["version"]
+        if not isinstance(remote, str) or not _version_key(remote):
+            raise ValueError(f"bad version {remote!r}")
+    except Exception as exc:  # network, HTTP, JSON or schema errors: report, never raise
+        log.warning("rule update check failed for %s: %s", url, exc)
+        return None
+    return manifest if _version_key(remote) > _version_key(current_version) else None
+
 
 
 def _line_index(text: str) -> List[int]:
@@ -230,9 +457,11 @@ def scan(text: str, detectors: Optional[List[Detector]] = None) -> List[Finding]
     return chosen
 
 
-def redact(text: str, findings: Optional[List[Finding]] = None) -> Tuple[str, List[Finding]]:
+def redact(
+    text: str, findings: Optional[List[Finding]] = None, detectors: Optional[List[Detector]] = None
+) -> Tuple[str, List[Finding]]:
     """Replace each finding with a [REDACTED:<DETECTOR>] token."""
-    findings = scan(text) if findings is None else findings
+    findings = scan(text, detectors) if findings is None else findings
     out: List[str] = []
     cursor = 0
     for f in findings:

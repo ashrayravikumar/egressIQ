@@ -5,18 +5,28 @@ Examples:
     python cli.py --file app.log --dry-run            # sanitized text -> stdout
     python cli.py --file app.log --export-pdf         # egressiq_audit_report.pdf
     cat prompt.txt | python cli.py --dry-run          # read from stdin
+    python cli.py --file app.log --rules policy.yaml  # custom/override detectors
     python cli.py web [--port 8000] [--open]          # launch the demo web UI
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import List, Optional, TextIO
 
-from scanner import Finding, redact, scan
+from scanner import Finding, RuleSet, load_rules, redact, scan
 
 DEFAULT_PDF = "egressiq_audit_report.pdf"
+
+
+def load_rules_or_warn(path: Optional[str]) -> RuleSet:
+    """load_rules(), with any rejected-file problem printed to stderr (shared with `egressiq web`)."""
+    rules = load_rules(path)
+    for err in rules.errors:
+        print(f"egressiq: warning: ignoring rule file, using built-in rules: {err}", file=sys.stderr)
+    return rules
 
 
 def _print_summary(findings: List[Finding], source: str, out: TextIO) -> None:
@@ -38,6 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--export-pdf", metavar="OUT", nargs="?", const=DEFAULT_PDF,
         help=f"write an executive audit PDF (default name: {DEFAULT_PDF})",
     )
+    p.add_argument(
+        "--rules", metavar="PATH", default=os.environ.get("EGRESSIQ_RULES"),
+        help="JSON/YAML rule file merged over the built-in detectors (default: $EGRESSIQ_RULES)",
+    )
     p.add_argument("--dry-run", action="store_true", help="write the sanitized text to stdout")
     p.add_argument(
         "--fail-on-findings", action="store_true",
@@ -58,6 +72,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return run(argv[1:])
 
     args = build_parser().parse_args(argv)
+    rules = load_rules_or_warn(args.rules)
 
     if args.file and args.file != "-":
         source = args.file
@@ -71,7 +86,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         source = "<stdin>"
         text = sys.stdin.read()
 
-    findings = scan(text)
+    findings = scan(text, rules.detectors)
 
     if args.dry_run:
         sanitized, _ = redact(text, findings)
@@ -85,7 +100,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.export_pdf:
         from report import build_pdf
 
-        path = build_pdf(findings, source, text, args.export_pdf)
+        path = build_pdf(findings, source, text, args.export_pdf, compliance=rules.compliance)
         print(f"EgressIQ: audit report written to {path}", file=sys.stderr)
 
     return 1 if args.fail_on_findings and findings else 0

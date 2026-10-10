@@ -12,9 +12,9 @@ Identifies PII, auth keys, and database strings, redacting them in flight before
 - Proxy Engine (Upcoming): `fastapi`, `httpx`, or `mitmproxy`
 
 ## Layout
-- `scanner.py` — detector registry (`DETECTORS`), `scan()`, `redact()`
+- `scanner.py` — built-in rules (`DEFAULT_RULES`, plain data in rule-file shape), `load_rules()` → compiled `RuleSet`, `scan()`, `redact()`, `check_rule_updates()`. `DETECTORS` / `DETECTORS_BY_NAME` / `COMPLIANCE_IMPACT` are the compiled defaults, kept for existing callers
 - `report.py` — reportlab audit PDF (masked values only; cli imports it lazily). Also owns `risk_assessment()` and `regulatory_exposure()`, shared with the web UI so PDF and UI always agree
-- `scanner.COMPLIANCE_IMPACT` — detector → compliance framework label (reporting metadata; `scan()` never reads it)
+- `scanner.COMPLIANCE_IMPACT` — detector → compliance framework label (reporting metadata; `scan()` never reads it). With custom rules use `RuleSet.compliance`; `report.build_pdf()` / `regulatory_exposure()` take it as `compliance=`
 - `cli.py` — argparse CLI
 - `web/server.py` — FastAPI wrapper: `/api/scan`, `/api/upload`, `/api/report` (calls `scanner`/`report`, never reimplements them)
 - `web/static/` — single-page UI (`index.html`, `styles.css`, `app.js`); `web/samples.py` — fake demo payloads
@@ -28,9 +28,30 @@ Identifies PII, auth keys, and database strings, redacting them in flight before
 - Run scanner demo: `python scanner.py`
 - Run tests: `python -m pytest -q`
 - Run tests on all supported versions (needs `uv`): `scripts/test_matrix.sh`
-- CLI: `egressiq --file <path> [--dry-run] [--export-pdf [OUT]] [--fail-on-findings]` (or `python cli.py ...`; stdin if no `--file`)
+- CLI: `egressiq --file <path> [--dry-run] [--export-pdf [OUT]] [--fail-on-findings] [--rules policy.yaml]` (or `python cli.py ...`; stdin if no `--file`)
 - Web UI: `egressiq web [--port 8000] [--open]` or `python app.py` → http://127.0.0.1:8000
 - Docker: `docker build -t egressiq .`, then `docker run --rm -v "$PWD:/data" egressiq --file /data/app.log --export-pdf` or `docker run --rm -p 8000:8000 egressiq web` (on Linux add `--user "$(id -u):$(id -g)"` so the PDF can be written to the mount)
+
+## Custom rules (`--rules` / `$EGRESSIQ_RULES`)
+JSON, or YAML with the `[yaml]` extra. Merged over the built-in rules; works for the CLI and `egressiq web`:
+```yaml
+version: "2026.11.0"          # optional; reported by /api/health and used by check_rule_updates
+extends_defaults: true        # false = only the rules below
+disable: [PHONE_NUMBER]       # drop built-in detectors by name
+detectors:
+  - name: EMAIL_ADDRESS       # existing name: override just these fields
+    severity: critical
+  - name: INTERNAL_PROJECT_CODE   # new name: category, severity, pattern required
+    category: infrastructure      # credential | pii | infrastructure
+    severity: high                # critical | high | medium | low
+    pattern: '\bPRJ-\d{6}\b'     # Python regex; optional group: N redacts only that capture group
+                                  # optional validator: <name> from scanner.VALIDATORS (e.g. luhn)
+    compliance: "Internal: Trade Secret"   # <= 40 chars; default "Custom policy"
+```
+- Regexes compile once in `load_rules()`; scans never recompile. A file that can't be read, parsed or validated is rejected whole (never half-applied): defaults are used and a warning goes to stderr (`RuleSet.errors`; `strict=True` raises `RulesError`).
+- Overriding a `pattern` resets `group` to 0 unless the override sets it; validators are kept.
+- Rule patterns are trusted admin config: a catastrophic-backtracking regex will slow every scan.
+- `check_rule_updates(url, current_version)` returns a `Future` (background thread) resolving to the remote manifest if its `version` is newer, else `None`. Check only: nothing is downloaded or applied. HTTPS required except localhost.
 
 ## Web UI demo
 1. `source venv/bin/activate && egressiq web --open`

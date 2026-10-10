@@ -15,7 +15,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /src
 COPY pyproject.toml scanner.py report.py cli.py ./
 COPY web ./web
-RUN pip install ".[web]" \
+RUN pip install ".[web,yaml]" \
     && rm -rf /src \
     && useradd --create-home --uid 10001 egressiq \
     && mkdir /data && chown egressiq:egressiq /data
