@@ -19,11 +19,12 @@
     findingsBody: $("findings-body"), findingsCount: $("findings-count"),
     engineText: $("engine-text"), enginePill: $("engine-pill"), toast: $("toast"), host: $("host"),
     kpiReg: $("kpi-reg"), regCount: $("reg-count"), regUnit: $("reg-unit"), regList: $("reg-list"),
-    maskBtn: $("mask-btn"), unmaskBtn: $("unmask-btn"), maskedBody: $("masked-body"),
+    maskBtn: $("mask-btn"), unmaskBtn: $("unmask-btn"), maskedBody: $("masked-body"), maskedView: $("payload-masked"),
   };
-  const MASK_KEY = "egressiq.maskRaw";
+  // Older builds remembered "unmasked" per browser; masking is now the default on every load.
+  try { localStorage.removeItem("egressiq.maskRaw"); } catch {}
 
-  const state = { source: DEFAULT_SOURCE, result: null, seq: 0, controller: null, samples: [], masked: false };
+  const state = { source: DEFAULT_SOURCE, result: null, seq: 0, controller: null, samples: [], masked: true };
 
   // ── Helpers ────────────────────────────────────────────
   function node(tag, cls, text) {
@@ -186,8 +187,9 @@
     }
   }
 
-  // ── Mask raw values (presenter mode) ───────────────────
-  // Swap each finding's raw text for the server-provided masked preview.
+  // ── Raw values are masked by default ───────────────────
+  // Swap each finding's raw text for the server-provided masked preview. Unmasking is an
+  // explicit, per-page-load choice: never remembered, never enabled from a URL.
   function maskedSegments(segments, findings) {
     return segments.map((s) => (s.f === undefined ? s : { t: findings[s.f].masked, f: s.f }));
   }
@@ -205,19 +207,23 @@
     }
   }
 
-  function setMasked(on, persist) {
+  function setMasked(on) {
     state.masked = on;
     document.body.classList.toggle("is-masked", on);
-    el.maskBtn.setAttribute("aria-pressed", String(on));
-    el.maskBtn.querySelector(".mask-label").textContent = on ? "Raw values masked" : "Mask raw values";
-    if (persist) { try { localStorage.setItem(MASK_KEY, on ? "1" : "0"); } catch {} }
+    el.maskBtn.setAttribute("aria-pressed", String(!on));  // the switch is "Unmask raw values"
+    el.maskBtn.querySelector(".mask-label").textContent = on ? "Unmask raw values" : "Raw values visible";
     renderRaw();
   }
 
-  function initialMask() {
-    const q = new URLSearchParams(location.search).get("mask");
-    if (q !== null) return q === "1" || q === "true";
-    try { return localStorage.getItem(MASK_KEY) === "1"; } catch { return false; }
+  // Masked view: paste still works, so the default never forces an unmask just to scan.
+  function pasteWhileMasked(e) {
+    const text = e.clipboardData && e.clipboardData.getData("text");
+    if (!text) return;
+    e.preventDefault();
+    el.payload.value = text;
+    setSource(DEFAULT_SOURCE); setPressedSample(null);
+    clearTimeout(debounce);
+    runScan();
   }
 
   // ── Cross-highlighting ─────────────────────────────────
@@ -406,10 +412,11 @@
   });
   el.scanBtn.addEventListener("click", runScan);
   el.maskBtn.addEventListener("click", () => {
-    setMasked(!state.masked, true);
-    toast(state.masked ? "Raw values masked for screen sharing" : "Raw values visible", "success");
+    setMasked(!state.masked);
+    toast(state.masked ? "Raw values masked" : "Raw values visible until you re-mask or reload", state.masked ? "success" : "");
   });
-  el.unmaskBtn.addEventListener("click", () => { setMasked(false, true); el.payload.focus(); });
+  el.unmaskBtn.addEventListener("click", () => { setMasked(false); el.payload.focus(); });
+  el.maskedView.addEventListener("paste", pasteWhileMasked);
   document.addEventListener("keydown", (e) => {
     const typing = e.target.closest && e.target.closest("textarea, input");
     if (!typing && e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.key.toLowerCase() === "m") {
@@ -439,7 +446,7 @@
   if (!/Mac|iPhone|iPad/.test(navigator.platform)) el.scanKbd.textContent = "Ctrl↵";
   el.host.textContent = location.host;
 
-  setMasked(initialMask(), false);
+  setMasked(true);
   initHealth();
   initSamples();
 })();

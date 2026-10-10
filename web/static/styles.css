@@ -281,21 +281,22 @@ mark.flash { animation: flash 1s ease-out; }
 
 .is-busy .kpi-value, .is-busy .pane-body { opacity: .6; transition: opacity .15s; }
 
-/* ── Mask raw values (presenter mode) ────────────────── */
+/* ── Raw values masked by default; switch = "Unmask raw values" ── */
 .mask-toggle { cursor: pointer; font: inherit; font-size: 12px; transition: border-color .15s, color .15s, background .15s; }
 .mask-toggle:hover { color: var(--text); border-color: var(--border-strong); }
 .mask-toggle:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 .mask-toggle svg { width: 14px; height: 14px; }
-.mask-toggle .icon-eye-off, .mask-toggle[aria-pressed="true"] .icon-eye { display: none; }
-.mask-toggle[aria-pressed="true"] .icon-eye-off { display: block; }
-.mask-toggle[aria-pressed="true"] { color: var(--brand); border-color: rgba(56, 189, 248, .45); background: rgba(56, 189, 248, .08); }
-.mask-toggle[aria-pressed="true"] svg { color: var(--brand); }
+/* Masked (switch off): eye-off. Unmasked (switch on): eye, in amber because raw secrets are on screen. */
+.mask-toggle .icon-eye, .mask-toggle[aria-pressed="true"] .icon-eye-off { display: none; }
+.mask-toggle[aria-pressed="true"] .icon-eye { display: block; }
+.mask-toggle[aria-pressed="true"] { color: var(--med); border-color: rgba(251, 191, 36, .45); background: rgba(251, 191, 36, .08); }
+.mask-toggle[aria-pressed="true"] svg { color: var(--med); }
 .switch { width: 24px; height: 14px; border-radius: 999px; background: var(--border-strong); position: relative; transition: background .15s; }
 .switch::after {
   content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%;
   background: #cbd5e1; transition: transform .15s;
 }
-.mask-toggle[aria-pressed="true"] .switch { background: var(--brand); }
+.mask-toggle[aria-pressed="true"] .switch { background: var(--med); }
 .mask-toggle[aria-pressed="true"] .switch::after { transform: translateX(10px); background: #fff; }
 
 .editor-masked { display: none; }
@@ -308,6 +309,7 @@ mark.flash { animation: flash 1s ease-out; }
   background: rgba(56, 189, 248, .06); border-bottom: 1px solid rgba(56, 189, 248, .18);
 }
 .btn-xs { padding: 3px 9px; font-size: 12px; }
+.editor-masked:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
 mark.masked { letter-spacing: .02em; }
 
 /* ── Responsive ──────────────────────────────────────── */

@@ -71,7 +71,7 @@ detectors:
 4. Drag a `.log/.txt/.json/.csv` file (≤ 5 MB) onto the payload panel, or use Upload file.
 5. Hover a highlight or findings row to trace it across both panes; click a row to jump to it.
 6. "Download Executive Audit PDF" streams the `report.py` PDF (masked values only).
-7. Screen-sharing real client data? Click **Mask raw values** in the top bar (or Shift+M) first: the editor and raw pane show masked previews only. Remembered per browser; `?mask=1` starts masked with no flash of raw values.
+7. Raw values are **masked by default** on every load (the HTML ships with `body.is-masked`, so there's no flash): the editor and raw pane show masked previews only. Paste (⌘/Ctrl+V into the masked view), drop a file or pick a sample to scan without unmasking. **Unmask raw values** (top bar, or Shift+M) is an explicit opt-in for the current page only: never remembered, and no URL parameter enables it.
 - Binds to 127.0.0.1 by default (`EGRESSIQ_HOST` overrides; the Docker image sets 0.0.0.0); use `--host 0.0.0.0` only on a trusted network.
 - Web tests (`tests/test_web.py`) skip automatically if the `[web]` extra isn't installed.
 
