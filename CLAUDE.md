@@ -16,17 +16,19 @@ Every change is judged against these four. If a change trades one away, stop and
 - Scanner & Redaction: `re` + stdlib dataclasses (no pydantic, to keep the hot path light)
 - PDF Audit Generation: `reportlab`
 - Web UI (optional `[web]` extra): `fastapi`, `uvicorn`, `python-multipart`; vanilla HTML/CSS/JS, no build step, no CDN
-- Proxy Engine (Upcoming): `fastapi`, `httpx`, or `mitmproxy`
+- Interception Gateway (optional `[gateway]` extra): `fastapi`, `httpx`, `uvicorn`
 
 ## Layout
 - `scanner.py` — built-in rules (`DEFAULT_RULES`, plain data in rule-file shape), `load_rules()` → compiled `RuleSet`, `scan()`, `redact()`, `check_rule_updates()`. `DETECTORS` / `DETECTORS_BY_NAME` / `COMPLIANCE_IMPACT` are the compiled defaults, kept for existing callers
 - `report.py` — reportlab audit PDF (masked values only; cli imports it lazily). Also owns `risk_assessment()` and `regulatory_exposure()`, shared with the web UI so PDF and UI always agree
 - `scanner.COMPLIANCE_IMPACT` — detector → compliance framework label (reporting metadata; `scan()` never reads it). With custom rules use `RuleSet.compliance`; `report.build_pdf()` / `regulatory_exposure()` take it as `compliance=`
-- `cli.py` — argparse CLI
+- `cli.py` — argparse CLI (`web` and `gateway` subcommands dispatch to `web.server.run` / `gateway.run`)
+- `gateway.py` — Interception Gateway: reverse proxy on `/v1/{path}` that redacts request bodies with `scanner` and relays responses as they stream. `sanitize_body()` is stdlib-only (used by `scripts/bench.py`); `create_app(upstream, rules, transport=)` builds the FastAPI app
 - `web/server.py` — FastAPI wrapper: `/api/scan`, `/api/upload`, `/api/report` (calls `scanner`/`report`, never reimplements them)
 - `web/static/` — single-page UI (`index.html`, `styles.css`, `app.js`); `web/samples.py` — fake demo payloads
 - `app.py` — `python app.py` launcher for the web UI
 - `Dockerfile` — `python:3.12-slim` image, entrypoint `egressiq` (CLI by default, `web` subcommand for the UI); sets `EGRESSIQ_HOST=0.0.0.0`, runs as non-root, writes PDFs to `/data`
+- `scripts/echo_upstream.py` — fake provider that prints and echoes what it received (gateway demos and CI smoke tests)
 - `tests/samples.py` — labelled positive/negative corpus for every detector
 - `report.audit_record()` — audit hash (SHA-256 over canonical JSON of generation time, ruleset version, payload SHA-256 and each finding's detector/severity/line/offsets; scheme `egressiq-audit-v1`). Printed in every PDF footer and the PDF keywords, on CLI stderr, and in `/api/report`'s `X-EgressIQ-Audit-Hash` header. Evidence only when stored outside the PDF (it isn't signed)
 - `tests/fixtures/sample_logs.csv` — 33-finding fixture covering every detector; `tests/test_report.py` extracts PDF text with `pypdf` to assert sections, framework labels and zero raw secrets
@@ -39,7 +41,8 @@ Every change is judged against these four. If a change trades one away, stop and
 - Latency vs targets (principle 1): `python scripts/bench.py` (exit 1 if any case misses; not in CI, too noisy)
 - CLI: `egressiq --file <path> [--dry-run] [--export-pdf [OUT]] [--fail-on-findings] [--rules policy.yaml]` (or `python cli.py ...`; stdin if no `--file`)
 - Web UI: `egressiq web [--port 8000] [--open]` or `python app.py` → http://127.0.0.1:8000
-- Docker: `docker build -t egressiq .`, then `docker run --rm -v "$PWD:/data" egressiq --file /data/app.log --export-pdf` or `docker run --rm -p 8000:8000 egressiq web` (on Linux add `--user "$(id -u):$(id -g)"` so the PDF can be written to the mount)
+- Gateway: `egressiq gateway [--port 8080] [--upstream https://api.openai.com] [--rules policy.yaml]`, then `OPENAI_BASE_URL=http://127.0.0.1:8080/v1` (or `ANTHROPIC_BASE_URL=http://127.0.0.1:8080` with `--upstream https://api.anthropic.com`). Demo without a provider: `python scripts/echo_upstream.py` + `--upstream http://127.0.0.1:9000`
+- Docker: `docker build -t egressiq .`, then `docker run --rm -v "$PWD:/data" egressiq --file /data/app.log --export-pdf` `docker run --rm -p 8000:8000 egressiq web` or `docker run --rm -p 8080:8080 egressiq gateway --upstream https://api.openai.com` (on Linux add `--user "$(id -u):$(id -g)"` so the PDF can be written to the mount)
 
 ## Custom rules (`--rules` / `$EGRESSIQ_RULES`)
 JSON, or YAML with the `[yaml]` extra. Merged over the built-in rules; works for the CLI and `egressiq web`:
@@ -64,6 +67,17 @@ detectors:
 - Rule patterns are trusted admin config: a catastrophic-backtracking regex will slow every scan.
 - `check_rule_updates(url, current_version)` returns a `Future` (background thread) resolving to the remote manifest if its `version` is newer, else `None`. Check only: nothing is downloaded or applied. HTTPS required except localhost.
 
+## Interception Gateway (`egressiq gateway`)
+- One upstream per gateway process; clients keep their own API keys (Authorization / x-api-key are forwarded, never logged). Request path, query and headers pass through; hop-by-hop headers are dropped.
+- JSON bodies: every string is redacted except `gateway.SKIP_KEYS` values (model, role, ids, names, base64 media, signed thinking blocks) and `data:...;base64,` URIs. Generic on purpose: no per-provider field list. A body with no findings is forwarded byte-for-byte.
+- multipart: UTF-8 parts redacted, binary parts forwarded (reported in `X-EgressIQ-Unscanned-Bytes`); other UTF-8 bodies redacted as text; other binary bodies forwarded unscanned.
+- Fail closed: malformed or too-deep JSON (400), compressed request bodies (415) and multipart without a boundary are rejected, never forwarded unscanned. Upstream down → 502, timeout → 504, as `{"type":"error","error":{"type":"egressiq_gateway_error",...}}`.
+- Responses are relayed raw (`aiter_raw`, content-encoding kept) as they arrive, so SSE streaming works; the gateway adds `X-EgressIQ-Redactions`, `X-EgressIQ-Detectors`, `X-EgressIQ-Ruleset` and `Server-Timing: egressiq;desc=sanitize;dur=<ms>`.
+- Plain-http upstreams are refused unless loopback or `--insecure-upstream` (API keys would travel unencrypted). Binds 127.0.0.1 unless `EGRESSIQ_HOST`/`--host`.
+- Logs: one line per request with detector names and counts, never values. `--quiet` disables them.
+- Latency: CPU beyond the scanner is JSON parse/serialize (~0.01–0.03 ms on 4 KB; `tests/test_gateway.py` asserts < 0.15 ms). The proxy hop itself (uvicorn + Starlette + httpx) adds ~1 ms on loopback.
+- Not yet: responses aren't scanned, no block mode (redact only), no per-route upstream routing, request bodies are buffered in memory (no size cap).
+
 ## Web UI demo
 1. `source venv/bin/activate && egressiq web --open`
 2. The "Production app log" sample auto-scans on load: KPI cards (Total Findings, Critical Secrets Blocked, PII Redacted, Risk Level) and the raw-vs-sanitized diff populate immediately.
@@ -81,9 +95,10 @@ detectors:
 - Do not introduce heavy dependencies unless strictly necessary.
 - Always include automated tests for new regex pattern matchers: add positives and negatives to `tests/samples.py` (the suite fails if a detector has none).
 - Never write raw sensitive values to reports or logs; use `Finding.masked`. That includes hashes of raw values (short values like SSNs are brute-forceable).
-- Don't present the Interception Gateway (proxy) as generally available in reports or UI copy: it is in private pilot. Only claim what ships (scanner, CLI gate, web UI, PDF).
+- Don't present the Interception Gateway (proxy) as generally available in reports or UI copy: it is in private pilot. Only claim what ships (scanner, CLI gate, web UI, PDF; the gateway code ships in the repo but is pilot-stage).
 - Web layer is a thin wrapper: keep detection/report logic in `scanner.py`/`report.py`, and insert payload text in the UI via `textContent` only (never `innerHTML`).
 
 ## Backlog
+- **Gateway proxy-hop latency.** ~1 ms per request on loopback is framework cost (uvicorn + Starlette routing + httpx client), not scanning. Options: a raw ASGI app instead of FastAPI, a leaner upstream client, or uvloop/httptools.
 - **Enterprise: signed audit hashes.** `report.audit_record()`'s hash is unsigned: it's tamper evidence only when the customer stores it outside the PDF (GRC system, ticket). For Enterprise-tier integrations, sign it server-side (HMAC-SHA256 with a managed key, or an asymmetric signature verifiable without the key) and print the signature plus key ID in the footer and `/api/report` headers. Bump the scheme to `egressiq-audit-v2`; keep v1 verifiable.
 - **Latency on dense 128 KB payloads (accepted 2026-10-10).** Typical payloads meet principle 1; secret-dense ones don't (`scripts/bench.py`: ~19 ms source code, ~25 ms log with ~1 secret/100 B, vs < 10 ms target). Deferred options: candidate-window regex evaluation (pure Python, ~2x), or a compiled multi-pattern engine (native dependency; conflicts with the no-heavy-dependencies rule).

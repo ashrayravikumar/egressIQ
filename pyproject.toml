@@ -22,6 +22,8 @@ classifiers = [
 [project.optional-dependencies]
 test = ["pytest>=7.0", "httpx>=0.24", "pypdf>=3.0", "pyyaml>=6.0"]
 web = ["fastapi>=0.100", "uvicorn>=0.23", "python-multipart>=0.0.6"]
+# `egressiq gateway`: the redacting reverse proxy.
+gateway = ["fastapi>=0.100", "uvicorn>=0.23", "httpx>=0.24"]
 # YAML rule files (--rules policy.yaml); JSON rule files need nothing extra.
 yaml = ["pyyaml>=6.0"]
 
@@ -29,7 +31,7 @@ yaml = ["pyyaml>=6.0"]
 egressiq = "cli:main_entry"
 
 [tool.setuptools]
-py-modules = ["scanner", "report", "cli"]
+py-modules = ["scanner", "report", "cli", "gateway"]
 packages = ["web"]
 
 [tool.setuptools.package-data]

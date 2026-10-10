@@ -7,6 +7,7 @@ Examples:
     cat prompt.txt | python cli.py --dry-run          # read from stdin
     python cli.py --file app.log --rules policy.yaml  # custom/override detectors
     python cli.py web [--port 8000] [--open]          # launch the demo web UI
+    python cli.py gateway --upstream https://api.openai.com   # redacting LLM reverse proxy on :8080
 """
 
 from __future__ import annotations
@@ -42,6 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="egressiq",
         description="Scan text for secrets and PII and redact them before GenAI egress.",
+        epilog="Also: 'egressiq web' (demo UI) and 'egressiq gateway' (redacting LLM reverse proxy); "
+               "add --help to either.",
     )
     p.add_argument("--file", metavar="PATH", help="text/log file to audit (default: stdin; '-' also means stdin)")
     p.add_argument(
@@ -70,6 +73,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                   "install with: pip install -e '.[web]'", file=sys.stderr)
             return 2
         return run(argv[1:])
+    if argv[:1] == ["gateway"]:
+        from gateway import run as run_gateway
+
+        return run_gateway(argv[1:])
 
     args = build_parser().parse_args(argv)
     rules = load_rules_or_warn(args.rules)

@@ -42,7 +42,7 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -e '.[test,web]'
+          python -m pip install -e '.[test,web,gateway]'
 
       - name: Test
         run: python -m pytest -q -W error::DeprecationWarning
@@ -65,6 +65,20 @@ jobs:
           curl -sf -H 'Content-Type: application/json' -d '{"text":"ssn 123-45-6789"}' \
             http://127.0.0.1:8765/api/report -o web.pdf
           head -c 4 web.pdf | grep -q '%PDF'
+
+      - name: Gateway smoke test
+        run: |
+          python scripts/echo_upstream.py --port 9100 > upstream.log 2>&1 &
+          egressiq gateway --port 8780 --upstream http://127.0.0.1:9100 > gateway.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8780/egressiq/health && break; sleep 1; done
+          printf '{"model":"gpt-4o","messages":[{"role":"user","content":"key %s card 4111 1111 1111 1111"}]}' \
+            "AKIA""IOSFODNN7EXAMPLE" > prompt.json
+          curl -sf -H 'Authorization: Bearer sk-test' -H 'Content-Type: application/json' -d @prompt.json \
+            http://127.0.0.1:8780/v1/chat/completions > reply.json
+          grep -q 'REDACTED:AWS_ACCESS_KEY_ID' reply.json
+          grep -q 'REDACTED:CREDIT_CARD' reply.json
+          if grep -q 'IOSFODNN7EXAMPLE' reply.json upstream.log; then echo "raw secret reached upstream"; exit 1; fi
+          grep -q 'redacted 2' gateway.log
 
   docker:
     name: docker image
@@ -96,3 +110,16 @@ jobs:
           for i in $(seq 1 30); do curl -sf http://127.0.0.1:8000/api/health && break; sleep 1; done
           curl -sf http://127.0.0.1:8000/api/health | grep -q '"status":"ok"'
           docker rm -f egressiq-web
+
+      - name: Gateway smoke test
+        run: |
+          python3 scripts/echo_upstream.py --port 9100 > upstream.log 2>&1 &
+          docker run -d --name egressiq-gw --network host egressiq gateway --upstream http://127.0.0.1:9100
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:8080/egressiq/health && break; sleep 1; done
+          printf '{"model":"gpt-4o","messages":[{"role":"user","content":"ssn 123-45-6789 key %s"}]}' \
+            "AKIA""IOSFODNN7EXAMPLE" > prompt.json
+          curl -sf -H 'Content-Type: application/json' -d @prompt.json \
+            http://127.0.0.1:8080/v1/chat/completions > reply.json
+          grep -q 'REDACTED:US_SSN' reply.json
+          if grep -q 'IOSFODNN7EXAMPLE' reply.json upstream.log; then echo "raw secret reached upstream"; exit 1; fi
+          docker rm -f egressiq-gw
