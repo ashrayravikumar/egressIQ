@@ -152,3 +152,28 @@ def test_web_bind_host(monkeypatch, env, argv, expected):
     monkeypatch.setattr(uvicorn, "run", lambda app, **kw: seen.update(kw))
     assert server.run(argv) == 0
     assert seen["host"] == expected
+
+
+@pytest.mark.parametrize("env,argv,expected", [
+    (None, [], 8000),
+    ("10000", [], 10000),  # PaaS hosts assign the port via $PORT
+    ("10000", ["--port", "9000"], 9000),
+])
+def test_web_port(monkeypatch, env, argv, expected):
+    import uvicorn
+
+    if env is None:
+        monkeypatch.delenv("PORT", raising=False)
+    else:
+        monkeypatch.setenv("PORT", env)
+    seen = {}
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: seen.update(kw))
+    assert server.run(argv) == 0
+    assert seen["port"] == expected
+
+
+def test_web_rejects_bad_port_env(monkeypatch):
+    monkeypatch.setenv("PORT", "not-a-port")
+    with pytest.raises(SystemExit) as exc:
+        server.run([])
+    assert exc.value.code == 2

@@ -2,7 +2,8 @@
 #   docker build -t egressiq .
 #   docker run --rm -v "$PWD:/data" egressiq --file /data/app.log --export-pdf
 #   docker run --rm -i egressiq --dry-run < app.log
-#   docker run --rm -p 8000:8000 egressiq web
+#   docker run --rm -p 8000:8000 egressiq            (web UI; same as `egressiq web`)
+#   docker run --rm -e PORT=10000 -p 10000:10000 egressiq
 #   docker run --rm -p 8080:8080 egressiq gateway --upstream https://api.openai.com
 FROM python:3.12-slim
 
@@ -28,4 +29,5 @@ WORKDIR /data
 EXPOSE 8000 8080
 
 ENTRYPOINT ["egressiq"]
-CMD ["--help"]
+# Default: the web UI on $PORT (set by PaaS hosts), else 8000. Any arguments replace this.
+CMD ["web"]

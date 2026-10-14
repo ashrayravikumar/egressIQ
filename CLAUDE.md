@@ -27,7 +27,7 @@ Every change is judged against these four. If a change trades one away, stop and
 - `web/server.py` — FastAPI wrapper: `/api/scan`, `/api/upload`, `/api/report` (calls `scanner`/`report`, never reimplements them)
 - `web/static/` — single-page UI (`index.html`, `styles.css`, `app.js`); `web/samples.py` — fake demo payloads
 - `app.py` — `python app.py` launcher for the web UI
-- `Dockerfile` — `python:3.12-slim` image, entrypoint `egressiq` (CLI by default, `web` subcommand for the UI); sets `EGRESSIQ_HOST=0.0.0.0`, runs as non-root, writes PDFs to `/data`
+- `Dockerfile` — `python:3.12-slim` image, entrypoint `egressiq`, default `CMD ["web"]` (no arguments → web UI on `$PORT` or 8000; any arguments replace it, e.g. `--file ...` or `gateway`); sets `EGRESSIQ_HOST=0.0.0.0`, runs as non-root, writes PDFs to `/data`
 - `scripts/echo_upstream.py` — fake provider that prints and echoes what it received (gateway demos and CI smoke tests)
 - `tests/samples.py` — labelled positive/negative corpus for every detector
 - `report.audit_record()` — audit hash (SHA-256 over canonical JSON of generation time, ruleset version, payload SHA-256 and each finding's detector/severity/line/offsets; scheme `egressiq-audit-v1`). Printed in every PDF footer and the PDF keywords, on CLI stderr, and in `/api/report`'s `X-EgressIQ-Audit-Hash` header. Evidence only when stored outside the PDF (it isn't signed)
@@ -40,9 +40,9 @@ Every change is judged against these four. If a change trades one away, stop and
 - Run tests on all supported versions (needs `uv`): `scripts/test_matrix.sh`
 - Latency vs targets (principle 1): `python scripts/bench.py` (exit 1 if any case misses; not in CI, too noisy)
 - CLI: `egressiq --file <path> [--dry-run] [--export-pdf [OUT]] [--fail-on-findings] [--rules policy.yaml]` (or `python cli.py ...`; stdin if no `--file`)
-- Web UI: `egressiq web [--port 8000] [--open]` or `python app.py` → http://127.0.0.1:8000
+- Web UI: `egressiq web [--port 8000] [--open]` (`--port` defaults to `$PORT`, then 8000, for PaaS hosts) or `python app.py` → http://127.0.0.1:8000
 - Gateway: `egressiq gateway [--port 8080] [--upstream https://api.openai.com] [--rules policy.yaml]`, then `OPENAI_BASE_URL=http://127.0.0.1:8080/v1` (or `ANTHROPIC_BASE_URL=http://127.0.0.1:8080` with `--upstream https://api.anthropic.com`). Demo without a provider: `python scripts/echo_upstream.py` + `--upstream http://127.0.0.1:9000`
-- Docker: `docker build -t egressiq .`, then `docker run --rm -v "$PWD:/data" egressiq --file /data/app.log --export-pdf` `docker run --rm -p 8000:8000 egressiq web` or `docker run --rm -p 8080:8080 egressiq gateway --upstream https://api.openai.com` (on Linux add `--user "$(id -u):$(id -g)"` so the PDF can be written to the mount)
+- Docker: `docker build -t egressiq .`, then `docker run --rm -v "$PWD:/data" egressiq --file /data/app.log --export-pdf` `docker run --rm -p 8000:8000 egressiq` (web UI) or `docker run --rm -p 8080:8080 egressiq gateway --upstream https://api.openai.com` (on Linux add `--user "$(id -u):$(id -g)"` so the PDF can be written to the mount)
 
 ## Custom rules (`--rules` / `$EGRESSIQ_RULES`)
 JSON, or YAML with the `[yaml]` extra. Merged over the built-in rules; works for the CLI and `egressiq web`:

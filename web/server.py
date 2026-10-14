@@ -167,7 +167,10 @@ def run(argv: Optional[List[str]] = None) -> int:
     p = argparse.ArgumentParser(prog="egressiq web", description="Launch the EgressIQ demo web UI.")
     p.add_argument("--host", default=os.environ.get("EGRESSIQ_HOST", "127.0.0.1"),
                    help="bind address (default: $EGRESSIQ_HOST or 127.0.0.1, local only)")
-    p.add_argument("--port", type=int, default=8000, help="port (default: 8000)")
+    # $PORT is how PaaS hosts (Render, Railway, Cloud Run, ...) assign the listen port.
+    # argparse runs string defaults through type=int, so a bad $PORT is a clean usage error.
+    p.add_argument("--port", type=int, default=os.environ.get("PORT", 8000),
+                   help="port (default: $PORT or 8000)")
     p.add_argument("--rules", metavar="PATH", default=os.environ.get("EGRESSIQ_RULES"),
                    help="JSON/YAML rule file merged over the built-in detectors (default: $EGRESSIQ_RULES)")
     p.add_argument("--open", action="store_true", help="open the UI in your default browser")
