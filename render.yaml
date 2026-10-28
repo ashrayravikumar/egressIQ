@@ -1,0 +1,10 @@
+# Render Blueprint: the EgressIQ web UI, built from the Dockerfile (default CMD ["web"] serves on $PORT).
+services:
+  - type: web
+    name: egressiq
+    runtime: docker
+    plan: free
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeploy: true
